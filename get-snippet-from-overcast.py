@@ -1,20 +1,61 @@
-from email.mime import audio
-from enum import unique
 import os
 import subprocess
 import sys
 import urllib.request
+import urllib.parse
 import re
-from mutagen.mp3 import MP3
 from datetime import datetime, timedelta
 from google.cloud import storage
 import xml.etree.ElementTree as ET
 import random
 import uuid
-from mutagen.easyid3 import EasyID3
+from google.cloud import speech_v1p1beta1 as speech
+import yake
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
+PODCAST_IMAGE_URI = 'https://storage.googleapis.com/podcast_feed/Neon-podcast-logo.jpg'
 
+def speech_to_text(clip_gs_link):
+    config = speech.RecognitionConfig()
+    config.language_code = "en-ca"
+    config.encoding = speech.RecognitionConfig.AudioEncoding.FLAC
+   # config.sample_rate_hertz = 44100
+   # config.audio_channel_count = 2
+    config.enable_automatic_punctuation = True
+
+    audio = speech.RecognitionAudio()
+    audio.uri = clip_gs_link
+
+    text = speech_to_text_google(config, audio)
+    return text 
+
+# def top_keywords_experiment (text):
+#     for number in range(2,6):
+#         for number2 in numpy.arange(1, 6, 1):
+#             print ("dedup threshold="+str(0.1) + " window size="+str(number2)+ " ngram size=" + str(number))
+#             print(get_top_3_keywords(text, 0.1, number2, number))
+
+def get_top_3_keywords (text):
+    language = "en"
+    max_ngram_size = 3
+    deduplication_threshold = 0.1
+    deduplication_algo = 'seqm'
+    windowSize = 1
+    numOfKeywords = 3
+    kw_extractor = yake.KeywordExtractor(lan=language, n=max_ngram_size, dedupLim=deduplication_threshold, dedupFunc=deduplication_algo, windowsSize=windowSize, top=numOfKeywords, features=None)
+    keywords = kw_extractor.extract_keywords(text)
+    keywords_reduced = [keyword[0].capitalize() for keyword in keywords] # get just the word, not the weighting
+    return keywords_reduced
+
+def speech_to_text_google(config, audio):
+    client = speech.SpeechClient()
+    request = client.long_running_recognize(config=config, audio=audio)
+    response = request.result()
+    text = ""
+    for result in response.results:
+        best_alternative = result.alternatives[0].transcript
+        text += best_alternative + " "
+    return text
 
 def pseudo_random_uuid(seed):
     random.seed(seed)
@@ -47,19 +88,23 @@ class Podcast:
         self.episode_title = episode_title
 
     @classmethod
-    def from_mp3(cls, formatted_mp3, overcast_url, new_tags, podcast_show_title, podcast_episode_title):
-        #print(new_tags.pprint())
-        #print(formatted_mp3.tags.pprint())
-        #EasyID3.RegisterTextKey('artist', "TALB") # registering other places where the Podcast title may be
-        #mp3_show = id3_lookup_helper(new_tags, 'artist')
-        #mp3_title = id3_lookup_helper(new_tags, 'title')
-        # there's mores stuff if you dig into the mp3 formatted_mp3.tags.getall('TIT2')[0].text
+    def create(cls, overcast_url, podcast_show_title, podcast_episode_title):
         current_date_string = datetime.today().strftime("%d %B, %Y")
-        simple_description = 'An excerpt from ' + podcast_show_title + ' episode ' + podcast_episode_title
-        podcast_title = simple_description[:50]
-        return cls(podcast_title,current_date_string,overcast_url,'make a custom but deterministic guid','image_link',
-            simple_description,simple_description,'length not set yet', 'mp3 link not set yet',
+        simple_description = 'An excerpt from ' + podcast_show_title + ' episode ' + podcast_episode_title + '. Continue listening at ' + overcast_url
+        podcast_title = generate_acronym(podcast_show_title) + ": "
+        return cls(podcast_title,current_date_string,overcast_url,'make a custom but deterministic guid', PODCAST_IMAGE_URI,
+            simple_description,simple_description,'length not set yet', 'audio link not set yet',
             'duration not set yet',simple_description,podcast_show_title,podcast_episode_title)
+
+def generate_acronym (text):
+    common_words = ['The', 'A']
+    text = " ".join(filter(lambda w: not w in common_words,text.split()))
+
+    phrase = (text.replace('of', '')).split()
+    acronym = ""
+    for word in phrase:
+        acronym = acronym + word[0].upper()
+    return acronym
 
 def parse_overcast_timestamp (timestamp):
     if(len(timestamp) == 5):
@@ -93,49 +138,58 @@ def get_title_from_overcast(overcast_url):
     web_page = urllib.request.urlopen(overcast_url).read().decode()
     return get_title_from_overcast_page(web_page)
 
+
+
 def get_mp3_from_overcast(overcast_url):
-    storage_client = storage.Client('personalpodcastfeed')
-    bucket = storage_client.bucket('podcast_feed')
+    project_name = 'personalpodcastfeed'
+    bucket_name = 'podcast_feed'
+    storage_client = storage.Client(project_name)
+    bucket = storage_client.bucket(bucket_name)
     guid = pseudo_random_uuid(overcast_url)
     feed_blob = bucket.blob(PODCAST_XML_FILE)
     rss_xml_string = feed_blob.download_as_text()
     guid_string = str(guid)
     if guid_string in rss_xml_string: 
-        return
-
-    # break if rss xml string already contains guid
+        return     # break if rss xml string already contains guid
 
     full_mp3_file_name = get_sanitized_mp3_name(overcast_url)
 
     podcast_page_title = ''
-
     if not os.path.isfile(full_mp3_file_name):
         podcast_page_title = pull_mp3_from_overcast(overcast_url, full_mp3_file_name)
     else:
         podcast_page_title = get_title_from_overcast(overcast_url)
-# '<title>Why AI is having an on-prem moment &mdash; The Stack Overflow Podcast &mdash; Overcast</title>'
+
     podcast_page_title_components = podcast_page_title.split('&mdash;', 2)
     podcast_episode_title = podcast_page_title_components[0]
     podcast_show_title = podcast_page_title_components[1]
 
     timestamp = re.search('([^\/]+$)', overcast_url).group(0)
     file_friendly_timestamp = timestamp.replace(':', '')
-    start_minute_string = get_start_timestamp(timestamp, 2)
+    minutesToGrab = 2
+    start_minute_string = get_start_timestamp(timestamp, minutesToGrab)
     end_minute_string = parse_overcast_timestamp(timestamp).strftime('%H:%M:%S')
-    formatted_mp3 = MP3(full_mp3_file_name)
-    podcast = Podcast.from_mp3(formatted_mp3, overcast_url, EasyID3(full_mp3_file_name), podcast_show_title, podcast_episode_title)
-    unique_title = file_friendly_timestamp + re.sub('\W+', '', ((podcast.episode_title+podcast.podcaster)[:50])) + ".mp3"
-    commands = ['ffmpeg', '-y', '-i', full_mp3_file_name, '-ss', start_minute_string, '-to', end_minute_string, '-c', 'copy', unique_title]
+    podcast = Podcast.create(overcast_url, podcast_show_title, podcast_episode_title)
+    unique_title = file_friendly_timestamp + re.sub('\W+', '', ((podcast.episode_title+podcast.podcaster)[:50])) + ".flac"
+    commands = ['ffmpeg', '-y', '-i', full_mp3_file_name, '-ss', start_minute_string, '-to', end_minute_string, '-f', 'flac', unique_title]
     subprocess.run(commands)
-    snippet_formatted_mp3 = MP3(unique_title)
-    mp3_duration_sceonds = snippet_formatted_mp3.info.length
+    mp3_duration_sceonds = minutesToGrab * 60
     
     mp3_blob = bucket.blob(unique_title)
     mp3_blob.upload_from_filename(unique_title)
+    gsutil_uri = 'gs://' + bucket_name + '/' + unique_title
+    text_for_audio = speech_to_text(gsutil_uri)
     podcast.mp3Link = mp3_blob.public_url
     podcast.lengthBytes = os.path.getsize(unique_title)
     podcast.durationString = "{:0>8}".format(str(timedelta(seconds=mp3_duration_sceonds)))
     podcast.guid = guid
+    podcast.descriptionHtml = podcast.descriptionHtml + "<br/>" + "<br/>" + text_for_audio
+    top_3_words = " ".join(get_top_3_keywords(text_for_audio))
+    podcast.title = podcast.title + top_3_words
+    image_search_local_file_name = image_search(top_3_words)
+    image_blob = bucket.blob(image_search_local_file_name)
+    image_blob.upload_from_filename(image_search_local_file_name)
+    podcast.displayImageLink = image_blob.public_url
     ET.parse
     rss = ET.fromstring(rss_xml_string)
     channel = rss.find('channel') 
@@ -146,8 +200,23 @@ def get_mp3_from_overcast(overcast_url):
         tree.write(file)  
     feed_blob.upload_from_filename(PODCAST_XML_FILE)
 
+def image_search(text):
+    text = urllib.parse.quote(text.encode('utf-8'))
+    headers = {}
+    headers['User-Agent'] = "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36"
+    url = "https://www.google.com/search?q=" +text + "&tbm=isch"
+    req = urllib.request.Request(url, headers=headers)
+    web_page = urllib.request.urlopen(req).read().decode()
+    image_url = "https://encrypted" + re.search('(?<=src="https://encrypted)(.*?)(?=")', web_page).group(0)
+    req = urllib.request.Request(image_url, headers=headers)
+    image_bytes = urllib.request.urlopen(req).read()
+    file_name = text+".jpeg"
+    image_file = open(file_name, 'wb')
+    image_file.write(image_bytes)
+    return file_name
+
 def create_new_podcast_entry(new_podcast):
-    template_file = open('podcast-episode-template.xml')
+    template_file = open('podcast-feed/podcast-episode-template.xml')
     template_string = template_file.read()
     data = {'title':new_podcast.title, 
         'publishDate':new_podcast.publishDate, 
@@ -162,7 +231,6 @@ def create_new_podcast_entry(new_podcast):
         'subtitle': new_podcast.subtitle
     }
     return (template_string%data)
-
 
 if __name__ == "__main__":
     argv=sys.argv[1:]

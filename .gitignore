@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# my custom podcast feed structure files and audio
+*.xml
+*.mp3
+*.flac
+*.m4a
