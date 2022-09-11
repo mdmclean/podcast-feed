@@ -11,29 +11,30 @@ import random
 import uuid
 from google.cloud import speech_v1p1beta1 as speech
 import yake
+from mutagen.id3 import APIC, ID3
+
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
 PODCAST_IMAGE_URI = 'https://storage.googleapis.com/podcast_feed/Neon-podcast-logo.jpg'
 
 def speech_to_text(clip_gs_link):
+    diarization_config = speech.SpeakerDiarizationConfig(
+        enable_speaker_diarization=True,
+        min_speaker_count=1,
+        max_speaker_count=2,
+    )
+
     config = speech.RecognitionConfig()
-    config.language_code = "en-ca"
+    config.language_code = "en-us" 
     config.encoding = speech.RecognitionConfig.AudioEncoding.FLAC
-   # config.sample_rate_hertz = 44100
-   # config.audio_channel_count = 2
     config.enable_automatic_punctuation = True
+    diarization_config = diarization_config
 
     audio = speech.RecognitionAudio()
     audio.uri = clip_gs_link
 
     text = speech_to_text_google(config, audio)
     return text 
-
-# def top_keywords_experiment (text):
-#     for number in range(2,6):
-#         for number2 in numpy.arange(1, 6, 1):
-#             print ("dedup threshold="+str(0.1) + " window size="+str(number2)+ " ngram size=" + str(number))
-#             print(get_top_3_keywords(text, 0.1, number2, number))
 
 def get_top_3_keywords (text):
     language = "en"
@@ -44,7 +45,7 @@ def get_top_3_keywords (text):
     numOfKeywords = 3
     kw_extractor = yake.KeywordExtractor(lan=language, n=max_ngram_size, dedupLim=deduplication_threshold, dedupFunc=deduplication_algo, windowsSize=windowSize, top=numOfKeywords, features=None)
     keywords = kw_extractor.extract_keywords(text)
-    keywords_reduced = [keyword[0].capitalize() for keyword in keywords] # get just the word, not the weighting
+    keywords_reduced = [keyword[0].lower() for keyword in keywords] # get just the word, not the weighting
     return keywords_reduced
 
 def speech_to_text_google(config, audio):
@@ -89,6 +90,7 @@ class Podcast:
 
     @classmethod
     def create(cls, overcast_url, podcast_show_title, podcast_episode_title):
+        # need to update date string <pubDate>Mon, 12 Nov 2018 21:00:00 Z</pubDate> https://discussions.apple.com/thread/8628782
         current_date_string = datetime.today().strftime("%d %B, %Y")
         simple_description = 'An excerpt from ' + podcast_show_title + ' episode ' + podcast_episode_title + '. Continue listening at ' + overcast_url
         podcast_title = generate_acronym(podcast_show_title) + ": "
@@ -161,8 +163,8 @@ def get_mp3_from_overcast(overcast_url):
         podcast_page_title = get_title_from_overcast(overcast_url)
 
     podcast_page_title_components = podcast_page_title.split('&mdash;', 2)
-    podcast_episode_title = podcast_page_title_components[0]
-    podcast_show_title = podcast_page_title_components[1]
+    podcast_episode_title = podcast_page_title_components[0].strip()
+    podcast_show_title = podcast_page_title_components[1].strip()
 
     timestamp = re.search('([^\/]+$)', overcast_url).group(0)
     file_friendly_timestamp = timestamp.replace(':', '')
@@ -170,26 +172,48 @@ def get_mp3_from_overcast(overcast_url):
     start_minute_string = get_start_timestamp(timestamp, minutesToGrab)
     end_minute_string = parse_overcast_timestamp(timestamp).strftime('%H:%M:%S')
     podcast = Podcast.create(overcast_url, podcast_show_title, podcast_episode_title)
-    unique_title = file_friendly_timestamp + re.sub('\W+', '', ((podcast.episode_title+podcast.podcaster)[:50])) + ".flac"
-    commands = ['ffmpeg', '-y', '-i', full_mp3_file_name, '-ss', start_minute_string, '-to', end_minute_string, '-f', 'flac', unique_title]
+    unique_file_title = file_friendly_timestamp + re.sub('\W+', '', ((podcast.episode_title+podcast.podcaster)[:50]))
+    temp_flac_title = "temp-" + unique_file_title + ".flac"
+    commands = ['ffmpeg', '-y', '-i', full_mp3_file_name, '-ss', start_minute_string, '-to', end_minute_string, '-f', 'flac', temp_flac_title]
     subprocess.run(commands)
     mp3_duration_sceonds = minutesToGrab * 60
     
-    mp3_blob = bucket.blob(unique_title)
-    mp3_blob.upload_from_filename(unique_title)
-    gsutil_uri = 'gs://' + bucket_name + '/' + unique_title
+    temp_flac_blob = bucket.blob(temp_flac_title)
+    temp_flac_blob.upload_from_filename(temp_flac_title)
+    gsutil_uri = 'gs://' + bucket_name + '/' + temp_flac_title
     text_for_audio = speech_to_text(gsutil_uri)
-    podcast.mp3Link = mp3_blob.public_url
-    podcast.lengthBytes = os.path.getsize(unique_title)
-    podcast.durationString = "{:0>8}".format(str(timedelta(seconds=mp3_duration_sceonds)))
-    podcast.guid = guid
-    podcast.descriptionHtml = podcast.descriptionHtml + "<br/>" + "<br/>" + text_for_audio
-    top_3_words = " ".join(get_top_3_keywords(text_for_audio))
+    
+    top_3_words = (" ".join(get_top_3_keywords(text_for_audio))).capitalize()
     podcast.title = podcast.title + top_3_words
-    image_search_local_file_name = image_search(top_3_words)
+    image_search_local_file_name = image_search(top_3_words + " clip art")
     image_blob = bucket.blob(image_search_local_file_name)
     image_blob.upload_from_filename(image_search_local_file_name)
     podcast.displayImageLink = image_blob.public_url
+    unique_mp3_title = unique_file_title + ".mp3" 
+    commands = ['ffmpeg', '-y', '-i', temp_flac_title, '-i', image_search_local_file_name, '-map', '1', '-map', '0', '-ab', '320k', '-map_metadata', '0', '-id3v2_version', '3', '-disposition:0', 'attached_pic', '-y', unique_mp3_title ]
+    subprocess.run(commands)
+
+    file = ID3(unique_mp3_title)
+    with open(image_search_local_file_name, 'rb') as albumart:
+        file.add(APIC(
+            encoding=3,
+            mime='image/jpeg',
+            type=3, desc=u'Cover',
+            data=albumart.read()
+        ))
+
+    mp3_blob = bucket.blob(unique_mp3_title)
+    mp3_blob.upload_from_filename(unique_mp3_title)
+
+    podcast.lengthBytes = os.path.getsize(unique_mp3_title)
+    podcast.durationString = "{:0>8}".format(str(timedelta(seconds=mp3_duration_sceonds)))
+    podcast.guid = guid
+    podcast.descriptionHtml = podcast.descriptionHtml + "<br/>" + "<br/>" + text_for_audio
+    podcast.mp3Link = mp3_blob.public_url
+
+    os.remove(temp_flac_title)
+    temp_flac_blob.delete()
+
     ET.parse
     rss = ET.fromstring(rss_xml_string)
     channel = rss.find('channel') 
@@ -233,6 +257,7 @@ def create_new_podcast_entry(new_podcast):
     return (template_string%data)
 
 if __name__ == "__main__":
+    test = get_top_3_keywords("Often times when people build robots or AI systems, they think of them as toys to Tinker with. In some sense, the robotics engineer types, their thing people, right? That makes the machinery and keeps it functioning but there's a human side of the equation and and you get the extreme thing people. And when were talking about, we've been talked about the necessity of having a technological, Enterprise embedded in an ethic and you can ignore that like most of the time, you can ignore that overall ethic in some sense when you're toying around with your toys. But when your building artificial intelligence, so I quell That's not a toy.")
     argv=sys.argv[1:]
     target_podcast_link = argv[0]
     get_mp3_from_overcast(target_podcast_link)
