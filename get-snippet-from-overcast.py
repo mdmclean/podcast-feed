@@ -4,7 +4,7 @@ import sys
 import urllib.request
 import urllib.parse
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from google.cloud import storage
 import xml.etree.ElementTree as ET
 import random
@@ -90,9 +90,8 @@ class Podcast:
 
     @classmethod
     def create(cls, overcast_url, podcast_show_title, podcast_episode_title):
-        # need to update date string <pubDate>Mon, 12 Nov 2018 21:00:00 Z</pubDate> https://discussions.apple.com/thread/8628782
-        current_date_string = datetime.today().strftime("%d %B, %Y")
-        simple_description = 'An excerpt from ' + podcast_show_title + ' episode ' + podcast_episode_title + '. Continue listening at ' + overcast_url
+        current_date_string = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %Z")
+        simple_description = 'An excerpt from ' + podcast_show_title + ' episode ' + podcast_episode_title + '. Continue listening on <a href="' + overcast_url + '">Overcast</a>'
         podcast_title = generate_acronym(podcast_show_title) + ": "
         return cls(podcast_title,current_date_string,overcast_url,'make a custom but deterministic guid', PODCAST_IMAGE_URI,
             simple_description,simple_description,'length not set yet', 'audio link not set yet',
@@ -127,7 +126,6 @@ def get_sanitized_mp3_name(text):
 def get_title_from_overcast_page(web_page):
     return re.search('(?<=<title>)(.*?)(?=</title>)', web_page).group(0)
 
-
 def pull_mp3_from_overcast(overcast_url, filename):
     web_page = urllib.request.urlopen(overcast_url).read().decode()
     mp3_link = re.search('https.*mp3', web_page).group(0)
@@ -139,8 +137,6 @@ def pull_mp3_from_overcast(overcast_url, filename):
 def get_title_from_overcast(overcast_url):
     web_page = urllib.request.urlopen(overcast_url).read().decode()
     return get_title_from_overcast_page(web_page)
-
-
 
 def get_mp3_from_overcast(overcast_url):
     project_name = 'personalpodcastfeed'
@@ -257,7 +253,6 @@ def create_new_podcast_entry(new_podcast):
     return (template_string%data)
 
 if __name__ == "__main__":
-    test = get_top_3_keywords("Often times when people build robots or AI systems, they think of them as toys to Tinker with. In some sense, the robotics engineer types, their thing people, right? That makes the machinery and keeps it functioning but there's a human side of the equation and and you get the extreme thing people. And when were talking about, we've been talked about the necessity of having a technological, Enterprise embedded in an ethic and you can ignore that like most of the time, you can ignore that overall ethic in some sense when you're toying around with your toys. But when your building artificial intelligence, so I quell That's not a toy.")
     argv=sys.argv[1:]
     target_podcast_link = argv[0]
     get_mp3_from_overcast(target_podcast_link)
