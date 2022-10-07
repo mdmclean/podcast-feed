@@ -1,5 +1,7 @@
 # podcast-feed
 
+Run `gcloud auth application-default login`
+
 Ideas 
 * summarizer? https://github.com/miso-belica/sumy
 * clip intros https://cloud.google.com/text-to-speech/docs/libraries

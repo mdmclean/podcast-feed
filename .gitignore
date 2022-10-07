@@ -133,3 +133,4 @@ dmypy.json
 *.mp3
 *.flac
 *.m4a
+temp-files/
