@@ -1,3 +1,4 @@
+import os
 from flask import Flask, render_template, request
 from get_snippet_from_overcast import get_mp3_from_overcast
 
@@ -13,5 +14,7 @@ def add_clip():
     print(content['targetUrl'])
     get_mp3_from_overcast(content['targetUrl'])
     return '', 200
+
+os.chdir("temp-files")
 
 app.run(host='0.0.0.0', port=81)

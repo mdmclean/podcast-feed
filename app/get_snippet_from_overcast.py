@@ -158,12 +158,16 @@ def get_mp3_from_overcast(overcast_url):
 
     full_mp3_file_name = get_sanitized_mp3_name(overcast_url)
 
+    full_mp3_blob = bucket.blob(full_mp3_file_name)
+
     log_info ("Grabbing mp3...")
     podcast_page_title = ''
-    if not os.path.isfile(full_mp3_file_name):
+    if not full_mp3_blob.exists():
         podcast_page_title = pull_mp3_from_overcast(overcast_url, full_mp3_file_name)
+        full_mp3_blob.upload_from_filename(full_mp3_file_name)
     else:
         podcast_page_title = get_title_from_overcast(overcast_url)
+        full_mp3_blob.download_to_filename(full_mp3_file_name)
 
     podcast_page_title_components = podcast_page_title.split('&mdash;', 2)
     podcast_episode_title = podcast_page_title_components[0].strip().replace('&ndash;', '-')
@@ -235,24 +239,25 @@ def get_mp3_from_overcast(overcast_url):
     podcast.descriptionHtml = podcast.descriptionHtml + "<br/>" + "<br/>" + text_for_audio
     podcast.mp3Link = mp3_blob.public_url
 
+    log_info ("Adding to podcast feed...")
+    rss = ET.fromstring(rss_xml_string)
+    channel = rss.find('channel') 
+    podcast_xml_subelement = ET.fromstring(create_new_podcast_entry(podcast)).find('item')
+    channel.append(podcast_xml_subelement)
+    with open(PODCAST_XML_FILE, 'wb') as file:
+        tree = ET.ElementTree(rss)
+        tree.write(file)  
+    feed_blob.upload_from_filename(PODCAST_XML_FILE)
+
     log_info ("Cleaning up...")
     os.remove(temp_flac_title)
     os.remove(temp_intro_file)
     os.remove(temp_intro_combined_file)
     os.remove(temp_text_to_speech_file)
+    os.remove(unique_mp3_title)
+    os.remove(image_search_local_file_name)
+    os.remove(full_mp3_file_name)
     temp_flac_blob.delete()
-
-    log_info ("Adding to podcast feed...")
-    if not already_added: 
-        ET.parse
-        rss = ET.fromstring(rss_xml_string)
-        channel = rss.find('channel') 
-        podcast_xml_subelement = ET.fromstring(create_new_podcast_entry(podcast)).find('item')
-        channel.append(podcast_xml_subelement)
-        with open(PODCAST_XML_FILE, 'wb') as file:
-            tree = ET.ElementTree(rss)
-            tree.write(file)  
-        feed_blob.upload_from_filename(PODCAST_XML_FILE)
 
 def image_search(text):
     text = urllib.parse.quote(text.encode('utf-8'))
@@ -270,7 +275,7 @@ def image_search(text):
     return file_name
 
 def create_new_podcast_entry(new_podcast):
-    template_file = open('podcast-feed/podcast-episode-template.xml')
+    template_file = open('podcast-episode-template.xml')
     template_string = template_file.read()
     data = {'title':new_podcast.title, 
         'publishDate':new_podcast.publishDate, 
@@ -314,10 +319,3 @@ def text_to_speech(file_name, text_to_speak):
     with open(file_name, "wb") as out:
         # Write the response to the output file.
         out.write(response.audio_content)
-
-if __name__ == "__main__":
-    argv=sys.argv[1:]
-    target_podcast_link = argv[0]
-    get_mp3_from_overcast(target_podcast_link)
-
-
