@@ -7,12 +7,19 @@ import re
 from datetime import datetime, timedelta, timezone
 from google.cloud import storage
 import xml.etree.ElementTree as ET
-import random
-import uuid
 from google.cloud import speech_v1p1beta1 as speech
+from numpy import true_divide
 import yake
 from mutagen.id3 import APIC, ID3
 from google.cloud import texttospeech
+from google.cloud import datastore
+import time
+from objects.overcast_details_fetcher import OvercastDetailsFetcher
+from objects.bookmark import Bookmark
+from objects.overcast_bookmark import OvercastBookmark
+from utilities.pseudo_random_uuid import pseudo_random_uuid
+from objects.podcast_feed import PodcastFeed
+from objects.google_datastore import GoogleDatastore
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
 
@@ -28,7 +35,6 @@ def speech_to_text(clip_gs_link, channel_count):
     config.encoding = speech.RecognitionConfig.AudioEncoding.FLAC
     config.enable_automatic_punctuation = True
     config.audio_channel_count = channel_count
-    diarization_config = diarization_config
 
     audio = speech.RecognitionAudio()
     audio.uri = clip_gs_link
@@ -59,10 +65,6 @@ def speech_to_text_google(config, audio):
         best_alternative = result.alternatives[0].transcript
         text += best_alternative + " "
     return text
-
-def pseudo_random_uuid(seed):
-    random.seed(seed)
-    return uuid.UUID(bytes=bytes(random.getrandbits(8) for _ in range(16)), version=4)
 
 def id3_lookup_helper(id3, tag_name):
     # add a try catch here eventually
@@ -125,8 +127,6 @@ def get_sanitized_mp3_name(text):
     remove_special_characters =  re.sub('\W+', '', trim_timesamp) + ".mp3"
     return remove_special_characters
 
-def get_title_from_overcast_page(web_page):
-    return re.search('(?<=<title>)(.*?)(?=</title>)', web_page).group(0)
 
 def pull_mp3_from_overcast(overcast_url, filename):
     web_page = urllib.request.urlopen(overcast_url).read().decode()
@@ -134,25 +134,98 @@ def pull_mp3_from_overcast(overcast_url, filename):
     mp3_bytes = urllib.request.urlopen(mp3_link).read()
     mp3_file = open(filename, 'wb')
     mp3_file.write(mp3_bytes)
-    return get_title_from_overcast_page(web_page)
+    return "" 
+    # TODO refactor - OvercastBookmark.get_title_from_overcast_page(None, web_page)
 
-def get_title_from_overcast(overcast_url):
-    web_page = urllib.request.urlopen(overcast_url).read().decode()
-    return get_title_from_overcast_page(web_page)
+
 
 def log_info (text):
     current_date_string = datetime.now().strftime("%a, %d %b %Y %H:%M:%S %Z")
     print (current_date_string + " - " + text)
 
+
+def store_overcast_timestamp(overcast_url, added_by):
+    store = GoogleDatastore()
+    oc_bookmark = OvercastBookmark(overcast_url, added_by, False, None)
+
+    already_added = store.check_if_entity_exists(oc_bookmark.id)
+    if already_added:
+        return
+
+    store.store_entry(oc_bookmark.id, oc_bookmark)    
+
+def convert_overcast_timestamps_to_bookmarks(overcast_web_fetcher:OvercastDetailsFetcher):
+    store = GoogleDatastore()
+    all_podcast_bookmarks = store.get_unprocessed("OvercastBookmark")
+
+    for overcast_bookmark_entity in all_podcast_bookmarks:
+        overcast_bookmark = OvercastBookmark.from_entity(overcast_bookmark_entity, overcast_web_fetcher)
+        bookmark = overcast_bookmark.convert_to_bookmark()
+        store.store_entry(bookmark.id, bookmark)
+        overcast_bookmark.is_processed = True
+        store.store_entry(overcast_bookmark.id, overcast_bookmark)
+        
+
+def group_unprocessed_clips():
+    store = GoogleDatastore()
+
+    all_podcast_bookmarks = store.get_unprocessed("OvercastBookmark")
+
+    podcasts = {}
+
+    for bookmark in all_podcast_bookmarks:
+        if bookmark["overcast_url"] in podcasts:
+            podcasts[bookmark["overcast_url"]].append(bookmark)
+        else: 
+            podcasts[bookmark["overcast_url"]] = [bookmark]  
+
+    for podcast in list(podcasts):
+        
+
+        ordered_timestamps = []
+
+        for bookmark in podcasts[podcast]:
+            ordered_timestamps.append(parse_overcast_timestamp(bookmark["podcast_timestamp"])) 
+
+        ordered_timestamps.sort()   
+
+        clustered_timestamps = []
+        current_cluster = -1
+
+        for ordered_ts in ordered_timestamps:
+            if current_cluster == -1: 
+                clustered_timestamps.append([])
+                current_cluster = 0
+                clustered_timestamps[0].append(ordered_ts)
+            else:
+                last_ts_in_current_group = clustered_timestamps[current_cluster][-1]
+                if (ordered_ts - last_ts_in_current_group).total_seconds() < 240:
+                    clustered_timestamps[current_cluster].append(ordered_ts)
+                else:
+                    clustered_timestamps.append([])
+                    current_cluster = current_cluster + 1
+                    clustered_timestamps[current_cluster].append(ordered_ts)
+        
+        for clips in clustered_timestamps:
+            clip_id = str(pseudo_random_uuid("clip" + podcast + str(clips[0])))
+            clip_start = (clips[0] - timedelta(minutes=2)).strftime('%H:%M:%S')
+            clip_end = (clips[-1] + timedelta(seconds=30)).strftime('%H:%M:%S')
+            store.store_new_clip(clip_id, podcast, clip_start, clip_end, time.time())
+
+        # for timestamps in podcast, mark as processed
+
+
 def get_mp3_from_overcast(overcast_url):
+    timestamp = re.search('([^\/]+$)', overcast_url).group(0)
+    guid = pseudo_random_uuid(overcast_url)
+    guid_string = str(guid)
     project_name = 'personalpodcastfeed'
     bucket_name = 'podcast_feed'
     storage_client = storage.Client(project_name)
     bucket = storage_client.bucket(bucket_name)
-    guid = pseudo_random_uuid(overcast_url)
     feed_blob = bucket.blob(PODCAST_XML_FILE)
     rss_xml_string = feed_blob.download_as_text()
-    guid_string = str(guid)
+
     if guid_string in rss_xml_string: 
         return     # break if rss xml string already contains guid
 
@@ -166,14 +239,13 @@ def get_mp3_from_overcast(overcast_url):
         podcast_page_title = pull_mp3_from_overcast(overcast_url, full_mp3_file_name)
         full_mp3_blob.upload_from_filename(full_mp3_file_name)
     else:
-        podcast_page_title = get_title_from_overcast(overcast_url)
+        podcast_page_title = OvercastBookmark.get_episode_title(overcast_url)
         full_mp3_blob.download_to_filename(full_mp3_file_name)
 
     podcast_page_title_components = podcast_page_title.split('&mdash;', 2)
     podcast_episode_title = podcast_page_title_components[0].strip().replace('&ndash;', '-')
     podcast_show_title = podcast_page_title_components[1].strip()
 
-    timestamp = re.search('([^\/]+$)', overcast_url).group(0)
     file_friendly_timestamp = timestamp.replace(':', '')
     minutesToGrab = 2
     start_minute_string = get_start_timestamp(timestamp, minutesToGrab)

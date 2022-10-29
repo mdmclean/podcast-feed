@@ -31,3 +31,4 @@ tabulate==0.8.10
 urllib3==1.26.12
 yake==0.4.8
 flask
+google-cloud-datastore
