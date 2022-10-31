@@ -14,20 +14,6 @@ class GoogleDatastore:
         entity.update(model.to_json())
         self.ds_client.put(entity)
 
-    def store_new_entry(self, unique_timestamp_id, url_base, podcast_timestamp, 
-        added_by, unix_timestamp):
-
-        key = self.ds_client.key('Bookmark', unique_timestamp_id)
-        entity = datastore.Entity(key=key)
-        entity.update({
-            'overcast_url': url_base,
-            'podcast_timestamp': podcast_timestamp,
-            'added_by': added_by,
-            'unix_timestamp': unix_timestamp,
-            'processed': False
-        })
-        self.ds_client.put(entity)
-
     def store_new_clip(self, unique_clip_id, url_base,
         start_timestamp, end_timestamp, unix_timestamp):
         
@@ -41,11 +27,11 @@ class GoogleDatastore:
         })
         self.ds_client.put(entity)
 
-    def check_if_entity_exists(self, key):
-        current_key = self.ds_client.get(self.ds_client.key("OvercastBookmark", key))
+    def check_if_entity_exists(self, key, entity_type):
+        current_key = self.ds_client.get(self.ds_client.key(entity_type, key))
         return current_key is not None
 
     def get_unprocessed(self, lookup_kind):
         query =  self.ds_client.query(kind=lookup_kind)
-        query.add_filter("processed", "=", False)
+        # query.add_filter("processed", "=", False)
         return list(query.fetch())

@@ -14,12 +14,16 @@ from mutagen.id3 import APIC, ID3
 from google.cloud import texttospeech
 from google.cloud import datastore
 import time
+from objects.entity_conversion_helper import EntityConversionHelper
 from objects.overcast_details_fetcher import OvercastDetailsFetcher
 from objects.bookmark import Bookmark
 from objects.overcast_bookmark import OvercastBookmark
 from utilities.pseudo_random_uuid import pseudo_random_uuid
-from objects.podcast_feed import PodcastFeed
+from objects.podcast import Podcast
+from objects.episode import Episode
+from objects.clip import Clip
 from objects.google_datastore import GoogleDatastore
+from objects.app_cache import AppCache
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
 
@@ -74,7 +78,7 @@ def id3_lookup_helper(id3, tag_name):
     else:
         return 'not found'
 
-class Podcast:
+class PodcastDetails:
     def __init__(self, title, publishDate, websiteLink,
         guid, displayImageLink, descriptionHtml, descriptionHtmlEncoded,
         lengthBytes, mp3Link, durationString, subtitle, podcaster,episode_title):
@@ -144,48 +148,62 @@ def log_info (text):
     print (current_date_string + " - " + text)
 
 
-def store_overcast_timestamp(overcast_url, added_by):
-    store = GoogleDatastore()
+def store_overcast_timestamp(overcast_url, added_by, store:GoogleDatastore):
     oc_bookmark = OvercastBookmark(overcast_url, added_by, False, None)
 
-    already_added = store.check_if_entity_exists(oc_bookmark.id)
+    already_added = store.check_if_entity_exists("OvercastBookmark", oc_bookmark.id)
     if already_added:
         return
 
     store.store_entry(oc_bookmark.id, oc_bookmark)    
 
-def convert_overcast_timestamps_to_bookmarks(overcast_web_fetcher:OvercastDetailsFetcher):
-    store = GoogleDatastore()
+def convert_overcast_timestamps_to_bookmarks(overcast_web_fetcher:OvercastDetailsFetcher, store:GoogleDatastore, app_cache:AppCache ):
     all_podcast_bookmarks = store.get_unprocessed("OvercastBookmark")
 
     for overcast_bookmark_entity in all_podcast_bookmarks:
-        overcast_bookmark = OvercastBookmark.from_entity(overcast_bookmark_entity, overcast_web_fetcher)
-        bookmark = overcast_bookmark.convert_to_bookmark()
+        overcast_bookmark = EntityConversionHelper.overcast_bookmark_from_entity(overcast_bookmark_entity, overcast_web_fetcher)
+
+        podcast_result = app_cache.podcast_cache.try_get_value(overcast_bookmark.get_show_title())
+        if not podcast_result.is_found:
+            podcast = Podcast("", True, overcast_bookmark.get_show_title())
+            app_cache.podcast_cache.add_to_dictionary(overcast_bookmark.get_show_title(), podcast)
+            store.store_entry(podcast.id, podcast) # TODO .. only store if it doesn't exist already
+        else:
+            podcast = podcast_result.value
+
+        episode_result = app_cache.episode_cache.try_get_value(overcast_bookmark.get_episode_title())
+        if not episode_result.is_found:
+            episode = Episode(podcast.id, overcast_bookmark.get_episode_title())
+            app_cache.episode_cache.add_to_dictionary(overcast_bookmark.get_episode_title(), episode)
+            store.store_entry(episode.id, episode) # TODO .. only store if it doesn't exist already
+        else:
+            episode = episode_result.value
+
+        bookmark = Bookmark(episode.id, overcast_bookmark.timestamp, overcast_bookmark.added_by, "Overcast", overcast_bookmark.id, overcast_bookmark.unix_timestamp, False)
         store.store_entry(bookmark.id, bookmark)
         overcast_bookmark.is_processed = True
         store.store_entry(overcast_bookmark.id, overcast_bookmark)
         
 
-def group_unprocessed_clips():
-    store = GoogleDatastore()
+def group_unprocessed_clips(store:GoogleDatastore):
+    all_podcast_bookmarks = store.get_unprocessed("Bookmark")
 
-    all_podcast_bookmarks = store.get_unprocessed("OvercastBookmark")
+    podcasts_episodes = {}
 
-    podcasts = {}
+    for bookmark_entity in all_podcast_bookmarks:
+        bookmark = EntityConversionHelper.bookmark_from_entity(bookmark_entity)
 
-    for bookmark in all_podcast_bookmarks:
-        if bookmark["overcast_url"] in podcasts:
-            podcasts[bookmark["overcast_url"]].append(bookmark)
+        # TODO this should be episode id ... going to have to generate show and episode when converting to bookmark
+        if bookmark.id in podcasts_episodes:
+            podcasts_episodes[bookmark.id].append(bookmark)
         else: 
-            podcasts[bookmark["overcast_url"]] = [bookmark]  
+            podcasts_episodes[bookmark.id] = [bookmark]  
 
-    for podcast in list(podcasts):
-        
-
+    for episode in list(podcasts_episodes):
         ordered_timestamps = []
 
-        for bookmark in podcasts[podcast]:
-            ordered_timestamps.append(parse_overcast_timestamp(bookmark["podcast_timestamp"])) 
+        for bookmark in podcasts_episodes[episode]:
+            ordered_timestamps.append(parse_overcast_timestamp(bookmark.timestamp)) 
 
         ordered_timestamps.sort()   
 
@@ -207,11 +225,9 @@ def group_unprocessed_clips():
                     clustered_timestamps[current_cluster].append(ordered_ts)
         
         for clips in clustered_timestamps:
-            clip_id = str(pseudo_random_uuid("clip" + podcast + str(clips[0])))
-            clip_start = (clips[0] - timedelta(minutes=2)).strftime('%H:%M:%S')
-            clip_end = (clips[-1] + timedelta(seconds=30)).strftime('%H:%M:%S')
-            store.store_new_clip(clip_id, podcast, clip_start, clip_end, time.time())
-
+            new_clip = Clip(None, clips[0], clips[-1], False)
+            store.store_entry(new_clip.id, new_clip)    
+            
         # for timestamps in podcast, mark as processed
 
 
@@ -250,7 +266,7 @@ def get_mp3_from_overcast(overcast_url):
     minutesToGrab = 2
     start_minute_string = get_start_timestamp(timestamp, minutesToGrab)
     end_minute_string = parse_overcast_timestamp(timestamp).strftime('%H:%M:%S')
-    podcast = Podcast.create(overcast_url, podcast_show_title, podcast_episode_title)
+    podcast = PodcastDetails.create(overcast_url, podcast_show_title, podcast_episode_title)
     unique_file_title = file_friendly_timestamp + re.sub('\W+', '', ((podcast.episode_title+podcast.podcaster)[:50]))
     temp_flac_title = "temp-" + unique_file_title + ".flac"
 

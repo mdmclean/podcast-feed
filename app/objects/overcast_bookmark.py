@@ -2,7 +2,6 @@ import time
 from objects.overcast_details_fetcher import OvercastDetailsFetcher
 import utilities.pseudo_random_uuid as id_generator
 import re
-from google.cloud import datastore
 from objects.bookmark import Bookmark
 
 class OvercastBookmark:
@@ -18,11 +17,6 @@ class OvercastBookmark:
         self.show_title = None
         self.episode_title = None
         self.fetcher = fetcher
-
-    @classmethod
-    def from_entity(cls, entity:datastore.Entity, fetcher):
-        full_url = entity["overcast_url"] + entity["podcast_timestamp"]
-        return cls(full_url, entity["added_by"], entity["processed"], fetcher)
 
     def load_podcast_details(self):
         page_title = self.fetcher.get_overcast_page_title(self.overcast_url_base)
