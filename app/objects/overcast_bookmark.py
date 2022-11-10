@@ -2,7 +2,6 @@ import time
 from objects.overcast_details_fetcher import OvercastDetailsFetcher
 import utilities.pseudo_random_uuid as id_generator
 import re
-from objects.bookmark import Bookmark
 
 class OvercastBookmark:
 
@@ -11,7 +10,7 @@ class OvercastBookmark:
         self.added_by = added_by
         self.id = str(id_generator.pseudo_random_uuid(overcast_url+added_by))
         self.is_processed = is_processed
-        self.timestamp = re.search(r'([^\/]+$)', overcast_url).group(0)
+        self.timestamp = re.search(r'([^\/]+$)', overcast_url).group(0) #TODO - bug if a timestamp isn't provided
         self.overcast_url_base = re.search(r'^(.*[\/])', overcast_url).group(0)
         self.unix_timestamp = time.time()
         self.show_title = None
@@ -22,7 +21,10 @@ class OvercastBookmark:
         page_title = self.fetcher.get_overcast_page_title(self.overcast_url_base)
         podcast_page_title_components = page_title.split('&mdash;', 2)
         self.episode_title = podcast_page_title_components[0].strip().replace('&ndash;', '-')
-        self.show_title = podcast_page_title_components[1].strip()
+        if len(podcast_page_title_components) > 1:
+            self.show_title = podcast_page_title_components[1].strip()
+        else:
+            self.show_title = 'no title'
 
     def get_show_title(self):
         if self.show_title is not None:
@@ -37,11 +39,6 @@ class OvercastBookmark:
         else:
             self.load_podcast_details()
             return self.episode_title
-
-    def convert_to_bookmark(self):
-        show_title = self.get_show_title()
-        episode_title = self.get_episode_title()
-        return Bookmark(show_title, episode_title, self.timestamp, self.added_by, "Overcast", self.id, self.unix_timestamp, None)
 
     def to_json(self):
         return {

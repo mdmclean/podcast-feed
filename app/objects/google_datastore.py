@@ -1,5 +1,4 @@
 from google.cloud import datastore
-import json
 
 class GoogleDatastore:
 
@@ -14,24 +13,15 @@ class GoogleDatastore:
         entity.update(model.to_json())
         self.ds_client.put(entity)
 
-    def store_new_clip(self, unique_clip_id, url_base,
-        start_timestamp, end_timestamp, unix_timestamp):
-        
-        key = self.ds_client.key('Clip', unique_clip_id)
-        entity = datastore.Entity(key=key)
-        entity.update({
-            'overcast_url': url_base,
-            'start_timestamp': start_timestamp,
-            'end_timestamp': end_timestamp,
-            'unix_timestamp': unix_timestamp,
-        })
-        self.ds_client.put(entity)
-
     def check_if_entity_exists(self, key, entity_type):
         current_key = self.ds_client.get(self.ds_client.key(entity_type, key))
         return current_key is not None
+    
+    def get_entity_by_key(self, key, entity_type):
+        entity = self.ds_client.get(self.ds_client.key(entity_type, key))
+        return entity
 
-    def get_unprocessed(self, lookup_kind):
+    def get_unprocessed(self, lookup_kind, processed_column):
         query =  self.ds_client.query(kind=lookup_kind)
-        # query.add_filter("processed", "=", False)
+        query.add_filter(processed_column, "=", False)
         return list(query.fetch())

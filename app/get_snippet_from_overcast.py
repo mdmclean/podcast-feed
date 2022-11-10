@@ -24,6 +24,7 @@ from objects.episode import Episode
 from objects.clip import Clip
 from objects.google_datastore import GoogleDatastore
 from objects.app_cache import AppCache
+import utilities.pseudo_random_uuid as id_generator
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
 
@@ -150,15 +151,10 @@ def log_info (text):
 
 def store_overcast_timestamp(overcast_url, added_by, store:GoogleDatastore):
     oc_bookmark = OvercastBookmark(overcast_url, added_by, False, None)
-
-    already_added = store.check_if_entity_exists("OvercastBookmark", oc_bookmark.id)
-    if already_added:
-        return
-
     store.store_entry(oc_bookmark.id, oc_bookmark)    
 
 def convert_overcast_timestamps_to_bookmarks(overcast_web_fetcher:OvercastDetailsFetcher, store:GoogleDatastore, app_cache:AppCache ):
-    all_podcast_bookmarks = store.get_unprocessed("OvercastBookmark")
+    all_podcast_bookmarks = store.get_unprocessed("OvercastBookmark", "processed")
 
     for overcast_bookmark_entity in all_podcast_bookmarks:
         overcast_bookmark = EntityConversionHelper.overcast_bookmark_from_entity(overcast_bookmark_entity, overcast_web_fetcher)
@@ -186,18 +182,17 @@ def convert_overcast_timestamps_to_bookmarks(overcast_web_fetcher:OvercastDetail
         
 
 def group_unprocessed_clips(store:GoogleDatastore):
-    all_podcast_bookmarks = store.get_unprocessed("Bookmark")
+    all_podcast_bookmarks = store.get_unprocessed("Bookmark", "is_processed")
 
     podcasts_episodes = {}
 
     for bookmark_entity in all_podcast_bookmarks:
         bookmark = EntityConversionHelper.bookmark_from_entity(bookmark_entity)
 
-        # TODO this should be episode id ... going to have to generate show and episode when converting to bookmark
-        if bookmark.id in podcasts_episodes:
-            podcasts_episodes[bookmark.id].append(bookmark)
+        if bookmark.fk_episode_id in podcasts_episodes:
+            podcasts_episodes[bookmark.fk_episode_id].append(bookmark)
         else: 
-            podcasts_episodes[bookmark.id] = [bookmark]  
+            podcasts_episodes[bookmark.fk_episode_id] = [bookmark]
 
     for episode in list(podcasts_episodes):
         ordered_timestamps = []
@@ -225,13 +220,37 @@ def group_unprocessed_clips(store:GoogleDatastore):
                     clustered_timestamps[current_cluster].append(ordered_ts)
         
         for clips in clustered_timestamps:
-            new_clip = Clip(None, clips[0], clips[-1], False)
+            clip_bookmark_ids = episode + " ".join(str(clip) for clip in clips)
+            hash = str(id_generator.pseudo_random_uuid(clip_bookmark_ids))
+            new_clip = Clip.from_date_times(episode, clips[0], clips[-1], False, hash, len(clips))
             store.store_entry(new_clip.id, new_clip)    
             
-        # for timestamps in podcast, mark as processed
+        for bookmark in podcasts_episodes[episode]:
+            bookmark.is_processed = True
+            store.store_entry(bookmark.id, bookmark)
 
+def grab_clips(store:GoogleDatastore):
+        unprocessed_clip_entities = store.get_unprocessed("Clip", "is_processed")
 
-def get_mp3_from_overcast(overcast_url):
+        for entity in unprocessed_clip_entities: 
+            clip = EntityConversionHelper.clip_from_entity(entity)
+            # look up episode from rss feed
+            episode_entity = store.get_entity_by_key(clip.fk_episode_id, 'Episode')
+            episode = EntityConversionHelper.episode_from_entity(episode_entity)
+
+            podcast_entity = store.get_entity_by_key(episode.fk_show_id, 'Podcast')
+            podcast = EntityConversionHelper.podcast_from_entity(podcast_entity)
+
+            if podcast.rss_feed_url is None or podcast.rss_feed_url == '':
+                continue 
+
+            clip.is_processed = True
+            store.store_entry(clip.id, clip)
+
+def get_mp3_from_rss_url(episode_name, rss_url):
+    return 0 # TODO
+
+def get_mp3_from_overcast(overcast_url): # TODO update to receive clip details
     timestamp = re.search('([^\/]+$)', overcast_url).group(0)
     guid = pseudo_random_uuid(overcast_url)
     guid_string = str(guid)
