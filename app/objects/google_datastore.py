@@ -25,3 +25,7 @@ class GoogleDatastore:
         query =  self.ds_client.query(kind=lookup_kind)
         query.add_filter(processed_column, "=", False)
         return list(query.fetch())
+    
+    def get_all(self, lookup_kind):
+        query =  self.ds_client.query(kind=lookup_kind)
+        return list(query.fetch())

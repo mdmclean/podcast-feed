@@ -4,6 +4,7 @@ import sys
 import urllib.request
 import urllib.parse
 import re
+import math
 from datetime import datetime, timedelta, timezone
 from google.cloud import storage
 import xml.etree.ElementTree as ET
@@ -24,6 +25,7 @@ from objects.episode import Episode
 from objects.clip import Clip
 from objects.google_datastore import GoogleDatastore
 from objects.app_cache import AppCache
+from objects.mp3_fetcher import Mp3Fetcher
 import utilities.pseudo_random_uuid as id_generator
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
@@ -230,11 +232,12 @@ def group_unprocessed_clips(store:GoogleDatastore):
             store.store_entry(bookmark.id, bookmark)
 
 def grab_clips(store:GoogleDatastore):
-        unprocessed_clip_entities = store.get_unprocessed("Clip", "is_processed")
+        unprocessed_clip_entities = store.get_all("Clip") #TODO switch back to get unprocessed "is_processed"
+        fetcher = Mp3Fetcher(20)
 
         for entity in unprocessed_clip_entities: 
             clip = EntityConversionHelper.clip_from_entity(entity)
-            # look up episode from rss feed
+            #TODO - cache
             episode_entity = store.get_entity_by_key(clip.fk_episode_id, 'Episode')
             episode = EntityConversionHelper.episode_from_entity(episode_entity)
 
@@ -242,13 +245,59 @@ def grab_clips(store:GoogleDatastore):
             podcast = EntityConversionHelper.podcast_from_entity(podcast_entity)
 
             if podcast.rss_feed_url is None or podcast.rss_feed_url == '':
-                continue 
+                #wait till we know where to look!
+                continue
 
-            clip.is_processed = True
-            store.store_entry(clip.id, clip)
+            if episode.mp3_url is None or episode.mp3_url == "not found in RSS feed":
+                episode.mp3_url = fetcher.get_mp3_from_rss_url(episode.episode_name, podcast.rss_feed_url)
+                store.store_entry(episode.id, episode)
 
-def get_mp3_from_rss_url(episode_name, rss_url):
-    return 0 # TODO
+            #clip.is_processed = True
+            #store.store_entry(clip.id, clip)
+
+def get_number_bookmarks(clip:Clip):
+    return clip.number_of_bookmarks
+
+def get_top_clips(store:GoogleDatastore):
+    clip_entities = store.get_all("Clip")
+
+    clips = [EntityConversionHelper.clip_from_entity(clip) for clip in clip_entities]
+
+    clips.sort(reverse=True, key=get_number_bookmarks)
+
+    yield "<style type='text/css'>.myTable { background-color:#eee;border-collapse:collapse; }.myTable th { background-color:#000;color:white;width:50%; }.myTable td, .myTable th { padding:5px;border:1px solid #000; }</style>"
+    yield "<table class='myTable'><th>Number of bookmarks</th><th>Podcast</th><th>Episode</th><th>Start Time</th><th>Length</th><th>Link</th>"
+
+    for clip in clips:
+        episode_entity = store.get_entity_by_key(clip.fk_episode_id, 'Episode')
+        episode = EntityConversionHelper.episode_from_entity(episode_entity)
+
+        podcast_entity = store.get_entity_by_key(episode.fk_show_id, 'Podcast')
+        podcast = EntityConversionHelper.podcast_from_entity(podcast_entity)
+
+        clip_start_seconds = 0
+        start_timestamp_parts = clip.clip_start.split(":")
+        if len(start_timestamp_parts) == 3:
+            clip_start_seconds = 3600*int(start_timestamp_parts[0]) + 60*int(start_timestamp_parts[1]) + int(start_timestamp_parts[2])
+        else:
+            clip_start_seconds = + 60*int(start_timestamp_parts[0]) + int(start_timestamp_parts[1])
+
+        minutes_to_listen_to = math.ceil((parse_overcast_timestamp(clip.clip_end) - parse_overcast_timestamp(clip.clip_start)).total_seconds() / 60)
+
+        yield "<tr>"
+        yield "<td>" + str(clip.number_of_bookmarks) + "</td>"
+        yield "<td>" + podcast.show_name + "</td>"
+        yield "<td>" + episode.episode_name + "</td>"
+        yield "<td>" + str(clip.clip_start) + "</td>"
+        yield "<td>" + str(minutes_to_listen_to) +" minutes</td>"
+        if episode.mp3_url is not None and episode.mp3_url != 'not found in RSS feed':
+            yield "<td><a href='"+ str(episode.mp3_url) + "#t=" + str(clip_start_seconds) + "'>link</a></td>"
+        else:
+            yield "<td>no link</td>"
+        yield "</tr> "
+    yield "</ul>"
+
+
 
 def get_mp3_from_overcast(overcast_url): # TODO update to receive clip details
     timestamp = re.search('([^\/]+$)', overcast_url).group(0)

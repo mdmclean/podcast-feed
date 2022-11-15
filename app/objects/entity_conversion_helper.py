@@ -20,10 +20,12 @@ class EntityConversionHelper:
     def clip_from_entity(entity:datastore.Entity):
         return Clip(entity.key, entity['fk_episode_id'], entity['start_timestamp'], entity['end_timestamp'], entity['is_processed'], entity['bookmark_hash'], entity['number_of_bookmarks'])
 
-
     @staticmethod
     def episode_from_entity(entity:datastore.Entity):
-        return Episode(entity['fk_show_id'], entity['episode_name'])
+        mp3_url = None
+        if 'mp3_url' in entity:
+            mp3_url = entity['mp3_url']
+        return Episode(entity['fk_show_id'], entity['episode_name'], mp3_url)
 
     @staticmethod
     def podcast_from_entity(entity:datastore.Entity):
