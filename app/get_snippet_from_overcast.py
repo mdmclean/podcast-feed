@@ -26,6 +26,7 @@ from objects.clip import Clip
 from objects.google_datastore import GoogleDatastore
 from objects.app_cache import AppCache
 from objects.mp3_fetcher import Mp3Fetcher
+from objects.cut_and_transcribe_result import CutAndTransribeResult
 import utilities.pseudo_random_uuid as id_generator
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
@@ -129,9 +130,8 @@ def get_start_timestamp(end_timestamp, mins):
     start_time = end_datetime - timedelta(minutes=mins)
     return start_time.strftime('%H:%M:%S')
 
-def get_sanitized_mp3_name(text):
-    trim_timesamp = re.search('^(.*[\\\/])', text).group(0)
-    remove_special_characters =  re.sub('\W+', '', trim_timesamp) + ".mp3"
+def remove_special_characters(text):
+    remove_special_characters =  re.sub('\W+', '', text)
     return remove_special_characters
 
 
@@ -144,7 +144,10 @@ def pull_mp3_from_overcast(overcast_url, filename):
     return "" 
     # TODO refactor - OvercastBookmark.get_title_from_overcast_page(None, web_page)
 
-
+def pull_mp3(mp3_url, temp_file_location):
+    mp3_bytes = urllib.request.urlopen(mp3_url).read()
+    mp3_file = open(temp_file_location, 'wb')
+    mp3_file.write(mp3_bytes)
 
 def log_info (text):
     current_date_string = datetime.now().strftime("%a, %d %b %Y %H:%M:%S %Z")
@@ -248,12 +251,23 @@ def grab_clips(store:GoogleDatastore):
                 #wait till we know where to look!
                 continue
 
-            if episode.mp3_url is None or episode.mp3_url == "not found in RSS feed":
+            if not(episode.has_mp3):
                 episode.mp3_url = fetcher.get_mp3_from_rss_url(episode.episode_name, podcast.rss_feed_url)
                 store.store_entry(episode.id, episode)
 
-            #clip.is_processed = True
-            #store.store_entry(clip.id, clip)
+            if episode.has_mp3() and not(clip.has_mp3()):
+                try:
+                    result:CutAndTransribeResult = cut_and_transcribe_clip(episode.mp3_url, clip.clip_start, clip.clip_end, podcast.show_name, episode.episode_name)
+                    clip.full_text_url = result.full_text_url
+                    clip.top_ngrams = result.top_ngrams
+                    clip.mp3_url = result.mp3_url
+                    clip.size_bytes = result.mp3_size_bytes
+                    clip.image_url = result.image_url
+                except Exception as e: 
+                    print ("failed for " + episode.episode_name + " - " + str(e))
+
+            clip.is_processed = True
+            store.store_entry(clip.id, clip)
 
 def get_number_bookmarks(clip:Clip):
     return clip.number_of_bookmarks
@@ -266,7 +280,7 @@ def get_top_clips(store:GoogleDatastore):
     clips.sort(reverse=True, key=get_number_bookmarks)
 
     yield "<style type='text/css'>.myTable { background-color:#eee;border-collapse:collapse; }.myTable th { background-color:#000;color:white;width:50%; }.myTable td, .myTable th { padding:5px;border:1px solid #000; }</style>"
-    yield "<table class='myTable'><th>Number of bookmarks</th><th>Podcast</th><th>Episode</th><th>Start Time</th><th>Length</th><th>Link</th>"
+    yield "<table class='myTable'><th>Number of bookmarks</th><th>Podcast</th><th>Episode</th><th>Start Time</th><th>Length</th><th>Episode Link</th><th>Clip Link</th><th>ngram</th><th>Full text link</th>"
 
     for clip in clips:
         episode_entity = store.get_entity_by_key(clip.fk_episode_id, 'Episode')
@@ -294,15 +308,23 @@ def get_top_clips(store:GoogleDatastore):
             yield "<td><a href='"+ str(episode.mp3_url) + "#t=" + str(clip_start_seconds) + "'>link</a></td>"
         else:
             yield "<td>no link</td>"
+        if clip.mp3_url is not None:
+            yield "<td><a href='"+ str(clip.mp3_url) + "'>link</a></td>"
+        else:
+            yield "<td>no link</td>"
+        yield "<td>" + str(clip.top_ngrams) + "</td>"
+        if clip.full_text_url is not None:
+            yield "<td><a href='"+ str(clip.full_text_url) + "'>link</a></td>"
+        else:
+            yield "<td>no link</td>"
         yield "</tr> "
+
     yield "</ul>"
 
 
 
-def get_mp3_from_overcast(overcast_url): # TODO update to receive clip details
-    timestamp = re.search('([^\/]+$)', overcast_url).group(0)
-    guid = pseudo_random_uuid(overcast_url)
-    guid_string = str(guid)
+def add_clip_to_personal_feed(clip:Clip, episode:Episode, podcast:Podcast):
+    guid_string = str(clip.id)
     project_name = 'personalpodcastfeed'
     bucket_name = 'podcast_feed'
     storage_client = storage.Client(project_name)
@@ -311,61 +333,90 @@ def get_mp3_from_overcast(overcast_url): # TODO update to receive clip details
     rss_xml_string = feed_blob.download_as_text()
 
     if guid_string in rss_xml_string: 
-        return     # break if rss xml string already contains guid
+        return ""    # break if rss xml string already contains guid
 
-    full_mp3_file_name = get_sanitized_mp3_name(overcast_url)
+    mp3_duration_seconds = math.ceil((parse_overcast_timestamp(clip.clip_end) - parse_overcast_timestamp(clip.clip_start)).total_seconds() / 60)
 
+    podcast = PodcastDetails.create(episode.mp3_url, podcast.show_name, episode.episode_name)
+    podcast.lengthBytes = clip.size_bytes
+    podcast.durationString = "{:0>8}".format(str(timedelta(seconds=mp3_duration_seconds)))
+    podcast.guid = clip.id
+    text_blob = bucket.from_string(clip.full_text_url)
+    text_for_audio = text_blob.download_as_texT()
+    podcast.descriptionHtml = podcast.descriptionHtml + "<br/>" + "<br/>" + text_for_audio
+    podcast.mp3Link = clip.mp3_url
+    podcast.title = clip.top_ngrams
+    podcast.displayImageLink = clip.image_url
+    
+    log_info ("Adding to podcast feed...")
+    rss = ET.fromstring(rss_xml_string)
+    channel = rss.find('channel') 
+    podcast_xml_subelement = ET.fromstring(create_new_podcast_entry(podcast)).find('item')
+    channel.append(podcast_xml_subelement)
+    with open(PODCAST_XML_FILE, 'wb') as file:
+        tree = ET.ElementTree(rss)
+        tree.write(file)  
+
+    feed_blob.upload_from_filename(PODCAST_XML_FILE)
+
+
+def cut_and_transcribe_clip(mp3_location, start_time, end_time, podcast_name, episode_name): # TODO update to receive clip details
+    result:CutAndTransribeResult = CutAndTransribeResult(None, None, None, None, None)
+    full_mp3_file_name = remove_special_characters(episode_name) +".mp3"
+    project_name = 'personalpodcastfeed'
+    bucket_name = 'podcast_feed'
+    storage_client = storage.Client(project_name)
+    bucket = storage_client.bucket(bucket_name)
     full_mp3_blob = bucket.blob(full_mp3_file_name)
 
     log_info ("Grabbing mp3...")
-    podcast_page_title = ''
     if not full_mp3_blob.exists():
-        podcast_page_title = pull_mp3_from_overcast(overcast_url, full_mp3_file_name)
+        pull_mp3(mp3_location, full_mp3_file_name)
         full_mp3_blob.upload_from_filename(full_mp3_file_name)
     else:
-        podcast_page_title = OvercastBookmark.get_episode_title(overcast_url)
         full_mp3_blob.download_to_filename(full_mp3_file_name)
 
-    podcast_page_title_components = podcast_page_title.split('&mdash;', 2)
-    podcast_episode_title = podcast_page_title_components[0].strip().replace('&ndash;', '-')
-    podcast_show_title = podcast_page_title_components[1].strip()
-
-    file_friendly_timestamp = timestamp.replace(':', '')
-    minutesToGrab = 2
-    start_minute_string = get_start_timestamp(timestamp, minutesToGrab)
-    end_minute_string = parse_overcast_timestamp(timestamp).strftime('%H:%M:%S')
-    podcast = PodcastDetails.create(overcast_url, podcast_show_title, podcast_episode_title)
-    unique_file_title = file_friendly_timestamp + re.sub('\W+', '', ((podcast.episode_title+podcast.podcaster)[:50]))
+    file_friendly_timestamp = start_time.replace(':', '')
+    unique_file_title = file_friendly_timestamp + re.sub('\W+', '', ((episode_name+podcast_name)[:50]))
     temp_flac_title = "temp-" + unique_file_title + ".flac"
 
     log_info("Trimming clip...")
-    commands = ['ffmpeg', '-y', '-i', full_mp3_file_name, '-ss', start_minute_string, '-to', end_minute_string, '-f', 'flac', temp_flac_title]
+    commands = ['ffmpeg', '-y', '-i', full_mp3_file_name, '-ss', start_time, '-to', end_time, '-f', 'flac', temp_flac_title]
     subprocess.run(commands)
 
     log_info ("Getting channel count...")
     flac_channel_count = int((subprocess.run(['ffprobe', '-i', temp_flac_title, '-show_entries', 'stream=channels', '-select_streams', 'a:0', '-of', 'compact=p=0:nk=1', '-v', '0'], capture_output=True, text=True).stdout).rstrip('\n'))
-    mp3_duration_seconds = minutesToGrab * 60
-    
+
     log_info ("Getting speech-to-text...")
-    temp_flac_blob = bucket.blob(temp_flac_title)
-    temp_flac_blob.upload_from_filename(temp_flac_title)
-    gsutil_uri = 'gs://' + bucket_name + '/' + temp_flac_title
-    text_for_audio = speech_to_text(gsutil_uri, flac_channel_count)
+    full_text_blob = bucket.blob(unique_file_title + "-transcript" +".txt")
+    text_for_audio = ""
+    if full_text_blob.exists():
+        text_for_audio = full_text_blob.download_as_text()
+    else: 
+        temp_flac_blob = bucket.blob(temp_flac_title)
+        temp_flac_blob.upload_from_filename(temp_flac_title)
+        gsutil_uri = 'gs://' + bucket_name + '/' + temp_flac_title
+        text_for_audio = speech_to_text(gsutil_uri, flac_channel_count)
+        temp_flac_blob.delete()
+        full_text_blob.upload_from_string(text_for_audio)
     
     log_info ("Getting title and art...")
     top_words = " ".join(((", ".join(get_top_keywords(text_for_audio))).capitalize()).split()[:10])
-    podcast.title = podcast.title + top_words
+
+    result.top_ngrams = top_words
+    result.full_text_url = full_text_blob.public_url
+
     image_search_local_file_name = image_search(top_words + " clip art")
     image_blob = bucket.blob(image_search_local_file_name)
     image_blob.upload_from_filename(image_search_local_file_name)
-    podcast.displayImageLink = image_blob.public_url
+    result.image_url = image_blob.public_url
 
     temp_text_to_speech_file = top_words+'speech.mp3'
     temp_intro_file = top_words+'_intro.mp3'
     temp_intro_combined_file = top_words+'combined.mp3'
 
     log_info ("Mixing intro...")
-    text_to_speech(temp_text_to_speech_file, "Welcome! This is:" + top_words + "! " + 'An excerpt from ' + podcast.podcaster + '. Episode: ' + podcast.episode_title)
+    text_to_speech(temp_text_to_speech_file, "Welcome! This is:" + top_words + "! " + 'An excerpt from ' + podcast_name + '. Episode: ' + episode_name)
     commands = ['ffmpeg', '-i', 'intro2.mp3', '-i', temp_text_to_speech_file, '-filter_complex', '[1:a:0]adelay=3000[a1];[a1]volume=volume=2.5[aa1];[0:a:0][aa1]amix=inputs=2[a]', '-map', '[a]', '-y', temp_intro_file]
     subprocess.run(commands)
     commands = ['ffmpeg', '-i', temp_flac_title, '-i', temp_intro_file, '-i', 'outro.mp3', '-filter_complex', '[1:a:0][0:a:0][2:a:0]concat=n=3:v=0:a=1[out]', '-map', '[out]', '-y', temp_intro_combined_file]    
@@ -389,21 +440,7 @@ def get_mp3_from_overcast(overcast_url): # TODO update to receive clip details
     mp3_blob = bucket.blob(unique_mp3_title)
     mp3_blob.upload_from_filename(unique_mp3_title)
 
-    podcast.lengthBytes = os.path.getsize(unique_mp3_title)
-    podcast.durationString = "{:0>8}".format(str(timedelta(seconds=mp3_duration_seconds)))
-    podcast.guid = guid
-    podcast.descriptionHtml = podcast.descriptionHtml + "<br/>" + "<br/>" + text_for_audio
-    podcast.mp3Link = mp3_blob.public_url
-
-    log_info ("Adding to podcast feed...")
-    rss = ET.fromstring(rss_xml_string)
-    channel = rss.find('channel') 
-    podcast_xml_subelement = ET.fromstring(create_new_podcast_entry(podcast)).find('item')
-    channel.append(podcast_xml_subelement)
-    with open(PODCAST_XML_FILE, 'wb') as file:
-        tree = ET.ElementTree(rss)
-        tree.write(file)  
-    feed_blob.upload_from_filename(PODCAST_XML_FILE)
+    result.mp3_url = mp3_blob.public_url
 
     log_info ("Cleaning up...")
     os.remove(temp_flac_title)
@@ -413,7 +450,7 @@ def get_mp3_from_overcast(overcast_url): # TODO update to receive clip details
     os.remove(unique_mp3_title)
     os.remove(image_search_local_file_name)
     os.remove(full_mp3_file_name)
-    temp_flac_blob.delete()
+    return result
 
 def image_search(text):
     text = urllib.parse.quote(text.encode('utf-8'))

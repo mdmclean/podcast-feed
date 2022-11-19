@@ -8,6 +8,13 @@ from objects.overcast_details_fetcher import OvercastDetailsFetcher
 
 class EntityConversionHelper:
     @staticmethod
+    def safe_property_check(entity:datastore.Entity, property_name:str):
+        if property_name in entity:
+            return entity[property_name]
+        else:
+            return None
+
+    @staticmethod
     def bookmark_from_entity(entity:datastore.Entity):
         return Bookmark(entity["fk_episode_id"], entity["timestamp"], entity["added_by"], entity["source"], entity["source_id"], entity["timestamp"], entity["is_processed"])
 
@@ -18,7 +25,7 @@ class EntityConversionHelper:
     
     @staticmethod
     def clip_from_entity(entity:datastore.Entity):
-        return Clip(entity.key, entity['fk_episode_id'], entity['start_timestamp'], entity['end_timestamp'], entity['is_processed'], entity['bookmark_hash'], entity['number_of_bookmarks'])
+        return Clip(entity.key, entity['fk_episode_id'], entity['start_timestamp'], entity['end_timestamp'], entity['is_processed'], entity['bookmark_hash'], entity['number_of_bookmarks'], EntityConversionHelper.safe_property_check(entity, 'full_text_url'), EntityConversionHelper.safe_property_check(entity, 'top_ngrams'), EntityConversionHelper.safe_property_check(entity, 'mp3_url'), EntityConversionHelper.safe_property_check(entity, 'image_url'), EntityConversionHelper.safe_property_check(entity, 'size_bytes'))
 
     @staticmethod
     def episode_from_entity(entity:datastore.Entity):

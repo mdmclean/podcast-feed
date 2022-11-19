@@ -18,3 +18,6 @@ class Episode:
             'episode_name': self.episode_name,
             'mp3_url': self.mp3_url
         }
+
+    def has_mp3(self):
+        return not(self.mp3_url is None or self.mp3_url == "not found in RSS feed" or self.mp3_url == "")
