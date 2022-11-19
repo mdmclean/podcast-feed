@@ -40,7 +40,7 @@ def sample_clips():
 def get_the_top_clips():
     return Response(stream_with_context(get_top_clips(store)))
 
-print (os.getcwd())
-os.chdir("podcast-feed/podcast-feed/temp-files")
+# os.chdir("podcast-feed/podcast-feed/temp-files")
 
-app.run(host='0.0.0.0', port=81)
+if __name__ == "__main__":
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
