@@ -9,7 +9,7 @@ class GoogleDatastore:
         target_table = model.__class__.__name__
         string_id = str(id)
         key = self.ds_client.key(target_table, string_id)
-        entity = datastore.Entity(key=key)
+        entity = datastore.Entity(key=key, exclude_from_indexes=("full_text",))
         entity.update(model.to_json())
         self.ds_client.put(entity)
 

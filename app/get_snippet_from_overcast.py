@@ -155,8 +155,9 @@ def log_info (text):
 
 
 def store_overcast_timestamp(overcast_url, added_by, store:GoogleDatastore):
-    oc_bookmark = OvercastBookmark(overcast_url, added_by, False, None)
-    store.store_entry(oc_bookmark.id, oc_bookmark)    
+    if not(store.check_if_entity_exists(OvercastBookmark.get_identifier(overcast_url, added_by), "OvercastBookmark")):
+        oc_bookmark = OvercastBookmark(overcast_url, added_by, False, None)
+        store.store_entry(oc_bookmark.id, oc_bookmark)   
 
 def convert_overcast_timestamps_to_bookmarks(overcast_web_fetcher:OvercastDetailsFetcher, store:GoogleDatastore, app_cache:AppCache ):
     all_podcast_bookmarks = store.get_unprocessed("OvercastBookmark", "processed")

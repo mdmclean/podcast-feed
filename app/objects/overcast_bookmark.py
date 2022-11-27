@@ -5,10 +5,14 @@ import re
 
 class OvercastBookmark:
 
+    @staticmethod
+    def get_identifier(overcast_url, added_by):
+        return str(id_generator.pseudo_random_uuid(overcast_url+added_by))
+
     def __init__(self, overcast_url, added_by, is_processed, fetcher:OvercastDetailsFetcher):
         self.overcast_url = overcast_url
         self.added_by = added_by
-        self.id = str(id_generator.pseudo_random_uuid(overcast_url+added_by))
+        self.id = OvercastBookmark.get_identifier(overcast_url, added_by)
         self.is_processed = is_processed
         self.timestamp = re.search(r'([^\/]+$)', overcast_url).group(0) #TODO - bug if a timestamp isn't provided
         self.overcast_url_base = re.search(r'^(.*[\/])', overcast_url).group(0)

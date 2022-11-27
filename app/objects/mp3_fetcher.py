@@ -22,7 +22,7 @@ class Mp3Fetcher:
 
         for episode in rss.iter('item'):
             print (episode.find('title').text)
-            shortened_episode_name = episode_name[:50]
+            shortened_episode_name = episode_name[:30]
             episode_name_without_special_characters = re.sub('(?<=&)(.*?)(?=;)', '', shortened_episode_name)
             condensed_episode_name =  re.sub('\W+', '', (episode_name_without_special_characters))              
             if (condensed_episode_name in re.sub('\W+', '',episode.find('title').text)):
