@@ -43,6 +43,7 @@ def speech_to_text(clip_gs_link, channel_count):
     config.encoding = speech.RecognitionConfig.AudioEncoding.FLAC
     config.enable_automatic_punctuation = True
     config.audio_channel_count = channel_count
+    config.diarization_config = diarization_config
 
     audio = speech.RecognitionAudio()
     audio.uri = clip_gs_link
@@ -159,40 +160,68 @@ def store_overcast_timestamp(overcast_url, added_by, store:GoogleDatastore):
         oc_bookmark = OvercastBookmark(overcast_url, added_by, False, None)
         store.store_entry(oc_bookmark.id, oc_bookmark)   
 
+def get_or_add_podcast_by_name(app_cache:AppCache, store:GoogleDatastore, podcast_name:str):
+    podcast_result = app_cache.podcast_cache.try_get_value(podcast_name)
+
+    if not podcast_result.is_found:
+        podcast_matches = store.find_entities_by_field("Podcast", "show_name", podcast_name)
+
+        if not podcast_matches:
+            podcast = Podcast.create("", True, podcast_name)
+            store.store_entry(podcast.id, podcast)
+        else:
+            podcast = EntityConversionHelper.podcast_from_entity(podcast_matches[0])
+
+        app_cache.podcast_cache.add_to_dictionary(podcast_name, podcast)
+    else:
+        podcast = podcast_result.value
+
+    return podcast
+
+def get_or_add_episode_by_name(app_cache:AppCache, store:GoogleDatastore, episode_name:str, podcast_fk:str):
+    episode_result = app_cache.episode_cache.try_get_value(episode_name)
+    
+    if not episode_result.is_found:
+        episode_matches = store.find_entities_by_field("Episode", "episode_name", episode_name)
+        
+        if not episode_matches:
+            episode = Episode(podcast_fk, episode_name, None)
+            store.store_entry(episode.id, episode)
+        else:
+            episode = EntityConversionHelper.episode_from_entity(episode_matches[0])
+
+        app_cache.episode_cache.add_to_dictionary(episode_name, episode)
+    else:
+        episode = episode_result.value
+
+    return episode
+
 def convert_overcast_timestamps_to_bookmarks(overcast_web_fetcher:OvercastDetailsFetcher, store:GoogleDatastore, app_cache:AppCache ):
     all_podcast_bookmarks = store.get_unprocessed("OvercastBookmark", "processed")
 
     for overcast_bookmark_entity in all_podcast_bookmarks:
         overcast_bookmark = EntityConversionHelper.overcast_bookmark_from_entity(overcast_bookmark_entity, overcast_web_fetcher)
 
-        podcast_result = app_cache.podcast_cache.try_get_value(overcast_bookmark.get_show_title())
-        if not podcast_result.is_found:
-            podcast = Podcast("", True, overcast_bookmark.get_show_title())
-            app_cache.podcast_cache.add_to_dictionary(overcast_bookmark.get_show_title(), podcast)
-            store.store_entry(podcast.id, podcast) # TODO .. only store if it doesn't exist already
-        else:
-            podcast = podcast_result.value
+        podcast:Podcast = get_or_add_podcast_by_name(app_cache, store, overcast_bookmark.get_show_title())
 
-        episode_result = app_cache.episode_cache.try_get_value(overcast_bookmark.get_episode_title())
-        if not episode_result.is_found:
-            episode = Episode(podcast.id, overcast_bookmark.get_episode_title())
-            app_cache.episode_cache.add_to_dictionary(overcast_bookmark.get_episode_title(), episode)
-            store.store_entry(episode.id, episode) # TODO .. only store if it doesn't exist already
-        else:
-            episode = episode_result.value
+        episode:Episode = get_or_add_episode_by_name(app_cache, store, overcast_bookmark.get_episode_title(), podcast.id)
+
+
 
         bookmark = Bookmark(episode.id, overcast_bookmark.timestamp, overcast_bookmark.added_by, "Overcast", overcast_bookmark.id, overcast_bookmark.unix_timestamp, False)
-        store.store_entry(bookmark.id, bookmark)
+        if not store.check_if_entity_exists(bookmark.id, "Bookmark"):
+            store.store_entry(bookmark.id, bookmark)
+
         overcast_bookmark.is_processed = True
         store.store_entry(overcast_bookmark.id, overcast_bookmark)
         
 
 def group_unprocessed_clips(store:GoogleDatastore):
-    all_podcast_bookmarks = store.get_unprocessed("Bookmark", "is_processed")
+    unprocessed_bookmarks = store.get_unprocessed("Bookmark", "is_processed")
 
     podcasts_episodes = {}
 
-    for bookmark_entity in all_podcast_bookmarks:
+    for bookmark_entity in unprocessed_bookmarks:
         bookmark = EntityConversionHelper.bookmark_from_entity(bookmark_entity)
 
         if bookmark.fk_episode_id in podcasts_episodes:
@@ -228,15 +257,17 @@ def group_unprocessed_clips(store:GoogleDatastore):
         for clips in clustered_timestamps:
             clip_bookmark_ids = episode + " ".join(str(clip) for clip in clips)
             hash = str(id_generator.pseudo_random_uuid(clip_bookmark_ids))
-            new_clip = Clip.from_date_times(episode, clips[0], clips[-1], False, hash, len(clips))
-            store.store_entry(new_clip.id, new_clip)    
+            current_time = time.time()
+            new_clip = Clip.from_date_times(episode, clips[0], clips[-1], False, hash, len(clips), current_time, current_time)
+            if not store.check_if_entity_exists(new_clip.id, "Clip"):
+                store.store_entry(new_clip.id, new_clip)    
             
         for bookmark in podcasts_episodes[episode]:
             bookmark.is_processed = True
             store.store_entry(bookmark.id, bookmark)
 
 def grab_clips(store:GoogleDatastore):
-        unprocessed_clip_entities = store.get_all("Clip") #TODO switch back to get unprocessed "is_processed"
+        unprocessed_clip_entities = store.get_unprocessed("Clip", "is_processed") 
         fetcher = Mp3Fetcher(20)
 
         for entity in unprocessed_clip_entities: 
@@ -252,7 +283,7 @@ def grab_clips(store:GoogleDatastore):
                 #wait till we know where to look!
                 continue
 
-            if not(episode.has_mp3):
+            if not(episode.has_mp3()):
                 episode.mp3_url = fetcher.get_mp3_from_rss_url(episode.episode_name, podcast.rss_feed_url)
                 store.store_entry(episode.id, episode)
 
@@ -264,11 +295,32 @@ def grab_clips(store:GoogleDatastore):
                     clip.mp3_url = result.mp3_url
                     clip.size_bytes = result.mp3_size_bytes
                     clip.image_url = result.image_url
+                    clip.updated_unix_timestamp = time.time()
+                    clip.is_processed = True
+                    store.store_entry(clip.id, clip)
                 except Exception as e: 
                     print ("failed for " + episode.episode_name + " - " + str(e))
 
-            clip.is_processed = True
-            store.store_entry(clip.id, clip)
+                    # SELECT * FROM `Episode` WHERE fk_show_id = '18abd183-8b67-4723-8838-20dbcb06f179'
+                    # https://rss.art19.com/tim-ferriss-show
+
+
+# Tim Ferriss Podcast
+# Key(Podcast, 'cd9d84b0-0757-493a-8c8f-ebda349d9536')
+
+# Unmapped episodes
+
+
+# Weird one 
+# Key(Podcast, '8c76561e-6751-495a-b633-0830233cf41f')
+# Episode: Key(Episode, 'e70e2230-9525-483e-99a2-2096a21001c0')
+
+
+# Ready to remove
+# Key(Podcast, 'fe7722fe-3fa1-4e04-85bc-edb189dfab41')
+# Key(Podcast, 'd00f2e40-ea95-4673-b49f-77db2f9aa3ae')
+ 
+
 
 def get_number_bookmarks(clip:Clip):
     return clip.number_of_bookmarks
@@ -360,6 +412,15 @@ def add_clip_to_personal_feed(clip:Clip, episode:Episode, podcast:Podcast):
 
     feed_blob.upload_from_filename(PODCAST_XML_FILE)
 
+def clean_up_episode_names (store:GoogleDatastore):
+    episode_entries = store.get_all("Episode")
+
+    episodes = [EntityConversionHelper.episode_from_entity(ep) for ep in episode_entries]
+
+    for ep in episodes: 
+        ep.episode_name = ep.episode_name.replace("&rsquo;", "'")
+        store.store_entry(ep.id, ep)
+        
 
 def cut_and_transcribe_clip(mp3_location, start_time, end_time, podcast_name, episode_name): # TODO update to receive clip details
     result:CutAndTransribeResult = CutAndTransribeResult(None, None, None, None, None)
@@ -428,6 +489,8 @@ def cut_and_transcribe_clip(mp3_location, start_time, end_time, podcast_name, ep
     commands = ['ffmpeg', '-y', '-i', temp_intro_combined_file, '-i', image_search_local_file_name, '-map', '1', '-map', '0', '-ab', '320k', '-map_metadata', '0', '-id3v2_version', '3', '-disposition:0', 'attached_pic', '-y', unique_mp3_title ]
     subprocess.run(commands)
 
+    result.mp3_size_bytes = os.path.getsize(unique_mp3_title)
+    
     file = ID3(unique_mp3_title)
     with open(image_search_local_file_name, 'rb') as albumart:
         file.add(APIC(

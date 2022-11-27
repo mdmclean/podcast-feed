@@ -29,3 +29,8 @@ class GoogleDatastore:
     def get_all(self, lookup_kind):
         query =  self.ds_client.query(kind=lookup_kind)
         return list(query.fetch())
+
+    def find_entities_by_field(self, entity_type:str, field_name:str, field_value:str):
+        query =  self.ds_client.query(kind=entity_type)
+        query.add_filter(field_name, "=", field_value)
+        return list(query.fetch())

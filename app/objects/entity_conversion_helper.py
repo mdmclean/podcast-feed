@@ -25,7 +25,7 @@ class EntityConversionHelper:
     
     @staticmethod
     def clip_from_entity(entity:datastore.Entity):
-        return Clip(entity.key, entity['fk_episode_id'], entity['start_timestamp'], entity['end_timestamp'], entity['is_processed'], entity['bookmark_hash'], entity['number_of_bookmarks'], EntityConversionHelper.safe_property_check(entity, 'full_text_url'), EntityConversionHelper.safe_property_check(entity, 'top_ngrams'), EntityConversionHelper.safe_property_check(entity, 'mp3_url'), EntityConversionHelper.safe_property_check(entity, 'image_url'), EntityConversionHelper.safe_property_check(entity, 'size_bytes'))
+        return Clip(entity.key.name, entity['fk_episode_id'], entity['start_timestamp'], entity['end_timestamp'], entity['is_processed'], entity['bookmark_hash'], entity['number_of_bookmarks'], EntityConversionHelper.safe_property_check(entity, 'full_text_url'), EntityConversionHelper.safe_property_check(entity, 'top_ngrams'), EntityConversionHelper.safe_property_check(entity, 'mp3_url'), EntityConversionHelper.safe_property_check(entity, 'image_url'), EntityConversionHelper.safe_property_check(entity, 'size_bytes'), EntityConversionHelper.safe_property_check(entity, 'unix_timestamp'), EntityConversionHelper.safe_property_check(entity, 'updated_unix_timestamp'))
 
     @staticmethod
     def episode_from_entity(entity:datastore.Entity):
@@ -36,4 +36,4 @@ class EntityConversionHelper:
 
     @staticmethod
     def podcast_from_entity(entity:datastore.Entity):
-        return Podcast(entity['rss_feed_url'], entity['is_public'], entity['show_name'])
+        return Podcast(entity.key.name, entity['rss_feed_url'], entity['is_public'], entity['show_name'])
