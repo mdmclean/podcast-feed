@@ -2,6 +2,9 @@
 
 Run `gcloud auth application-default login`
 
+# Deploy
+`gcloud run deploy podcast-feed --source .` from repo root 
+
 Ideas 
 * summarizer? https://github.com/miso-belica/sumy
 * clip intros https://cloud.google.com/text-to-speech/docs/libraries

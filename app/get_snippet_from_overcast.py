@@ -301,26 +301,6 @@ def grab_clips(store:GoogleDatastore):
                 except Exception as e: 
                     print ("failed for " + episode.episode_name + " - " + str(e))
 
-                    # SELECT * FROM `Episode` WHERE fk_show_id = '18abd183-8b67-4723-8838-20dbcb06f179'
-                    # https://rss.art19.com/tim-ferriss-show
-
-
-# Tim Ferriss Podcast
-# Key(Podcast, 'cd9d84b0-0757-493a-8c8f-ebda349d9536')
-
-# Unmapped episodes
-
-
-# Weird one 
-# Key(Podcast, '8c76561e-6751-495a-b633-0830233cf41f')
-# Episode: Key(Episode, 'e70e2230-9525-483e-99a2-2096a21001c0')
-
-
-# Ready to remove
-# Key(Podcast, 'fe7722fe-3fa1-4e04-85bc-edb189dfab41')
-# Key(Podcast, 'd00f2e40-ea95-4673-b49f-77db2f9aa3ae')
- 
-
 
 def get_number_bookmarks(clip:Clip):
     return clip.number_of_bookmarks
