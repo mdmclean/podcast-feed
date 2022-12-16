@@ -9,6 +9,7 @@ class OvercastBookmark:
     def get_identifier(overcast_url, added_by):
         return str(id_generator.pseudo_random_uuid(overcast_url+added_by))
 
+    # TODO update this default constructor to receive all properties and add new creation logic wrapper
     def __init__(self, overcast_url, added_by, is_processed, fetcher:OvercastDetailsFetcher):
         self.overcast_url = overcast_url
         self.added_by = added_by

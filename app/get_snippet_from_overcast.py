@@ -28,6 +28,7 @@ from objects.app_cache import AppCache
 from objects.mp3_fetcher import Mp3Fetcher
 from objects.cut_and_transcribe_result import CutAndTransribeResult
 import utilities.pseudo_random_uuid as id_generator
+import openai
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
 
@@ -197,9 +198,9 @@ def get_or_add_episode_by_name(app_cache:AppCache, store:GoogleDatastore, episod
     return episode
 
 def convert_overcast_timestamps_to_bookmarks(overcast_web_fetcher:OvercastDetailsFetcher, store:GoogleDatastore, app_cache:AppCache ):
-    all_podcast_bookmarks = store.get_unprocessed("OvercastBookmark", "processed")
+    unprocessed_podcast_bookmarks = store.get_unprocessed("OvercastBookmark", "processed")
 
-    for overcast_bookmark_entity in all_podcast_bookmarks:
+    for overcast_bookmark_entity in unprocessed_podcast_bookmarks:
         overcast_bookmark = EntityConversionHelper.overcast_bookmark_from_entity(overcast_bookmark_entity, overcast_web_fetcher)
 
         podcast:Podcast = get_or_add_podcast_by_name(app_cache, store, overcast_bookmark.get_show_title())
@@ -303,7 +304,64 @@ def grab_clips(store:GoogleDatastore):
 
 
 def get_number_bookmarks(clip:Clip):
-    return clip.number_of_bookmarks
+    return clip.number_of_bookmarks / get_clip_length(clip)
+
+def add_clip_summaries(store:GoogleDatastore):
+    clip_entities = store.get_all("Clip")
+
+    clips = [EntityConversionHelper.clip_from_entity(clip) for clip in clip_entities]
+
+    clips.sort(reverse=True, key=get_number_bookmarks)
+
+    for clip in clips:
+        if clip.reduced_text_link is None and not (clip.full_text_url is None):
+            get_summary_text_for_clip(clip, store)
+
+def get_summary_text_for_clip(clip:Clip, store:GoogleDatastore):
+    clip_text = urllib.request.urlopen(clip.full_text_url).read().decode()
+
+    openai.api_key = ""
+
+    chunks = [clip_text[i:i+2000] for i in range(0, len(clip_text), 2000)]
+    general_prompt = " - Summarize the above discussion."
+
+    new_text = ""
+
+    for chunk in chunks:
+        my_prompt = "'" + chunk + "'" + general_prompt
+        response = openai.Completion.create(model="text-davinci-003", prompt=my_prompt, temperature=0, max_tokens=200)
+        new_text += "\n " + response.choices[0].text
+        print (response.choices[0].text)
+        time.sleep(20)
+
+    summary_prompt = "'" + new_text + "'" + " - Summarize the above discussion with as much detail as possible, without mentioning sponsors."
+    summary = openai.Completion.create(model="text-davinci-003", prompt=summary_prompt, temperature=0, max_tokens=500)
+    print (summary.choices[0].text)
+
+    super_summary_prompt = "'" + new_text + "'" + " - Give this discussion a category."
+    super_summary = openai.Completion.create(model="text-davinci-003", prompt=super_summary_prompt, temperature=0, max_tokens=10)
+    print (super_summary.choices[0].text)
+
+    project_name = 'personalpodcastfeed'
+    bucket_name = 'podcast_feed'
+    storage_client = storage.Client(project_name)
+    bucket = storage_client.bucket(bucket_name)
+    unique_file_title = clip.bookmark_hash
+
+    reduced_text_blob = bucket.blob(unique_file_title + "-reduced" +".txt")
+    reduced_text_blob.upload_from_string(new_text)
+    clip.reduced_text_link = reduced_text_blob.public_url
+
+    summary_text_blob = bucket.blob(unique_file_title + "-summary" +".txt")
+    summary_text_blob.upload_from_string(summary.choices[0].text)
+    clip.summary_text_link = summary_text_blob.public_url
+
+    clip.topic = super_summary.choices[0].text
+
+    store.store_entry(clip.id, clip)
+
+def get_clip_length(clip:Clip):
+    return math.ceil((parse_overcast_timestamp(clip.clip_end) - parse_overcast_timestamp(clip.clip_start)).total_seconds() / 60)
 
 def get_top_clips(store:GoogleDatastore):
     clip_entities = store.get_all("Clip")
@@ -311,9 +369,9 @@ def get_top_clips(store:GoogleDatastore):
     clips = [EntityConversionHelper.clip_from_entity(clip) for clip in clip_entities]
 
     clips.sort(reverse=True, key=get_number_bookmarks)
-
-    yield "<style type='text/css'>.myTable { background-color:#eee;border-collapse:collapse; }.myTable th { background-color:#000;color:white;width:50%; }.myTable td, .myTable th { padding:5px;border:1px solid #000; }</style>"
-    yield "<table class='myTable'><th>Number of bookmarks</th><th>Podcast</th><th>Episode</th><th>Start Time</th><th>Length</th><th>Episode Link</th><th>Clip Link</th><th>ngram</th><th>Full text link</th>"
+    
+    yield "<style type='text/css'>.myTable { background-color:#eee;border-collapse:collapse; }.myTable th { background-color:#000;color:white;width:50%;position: sticky; }.myTable td, .myTable th { padding:5px;border:1px solid #000; }</style>"
+    yield "<table class='myTable'><th>Number of bookmarks</th><th>Podcast</th><th>Episode</th><th>Start Time</th><th>Length</th><th>Episode Link</th><th>Clip Link</th><th>ngram</th><th>Full text link</th><th>Reduced text</th><th>Summary text</th><th>Topic</th>"
 
     for clip in clips:
         episode_entity = store.get_entity_by_key(clip.fk_episode_id, 'Episode')
@@ -329,7 +387,7 @@ def get_top_clips(store:GoogleDatastore):
         else:
             clip_start_seconds = + 60*int(start_timestamp_parts[0]) + int(start_timestamp_parts[1])
 
-        minutes_to_listen_to = math.ceil((parse_overcast_timestamp(clip.clip_end) - parse_overcast_timestamp(clip.clip_start)).total_seconds() / 60)
+        minutes_to_listen_to = get_clip_length(clip)
 
         yield "<tr>"
         yield "<td>" + str(clip.number_of_bookmarks) + "</td>"
@@ -342,14 +400,26 @@ def get_top_clips(store:GoogleDatastore):
         else:
             yield "<td>no link</td>"
         if clip.mp3_url is not None:
-            yield "<td><a href='"+ str(clip.mp3_url) + "'>link</a></td>"
+            yield "<td><a href='"+ str(clip.mp3_url) + "' target='_blank'>link</a></td>"
         else:
             yield "<td>no link</td>"
         yield "<td>" + str(clip.top_ngrams) + "</td>"
         if clip.full_text_url is not None:
-            yield "<td><a href='"+ str(clip.full_text_url) + "'>link</a></td>"
+            yield "<td><a href='"+ str(clip.full_text_url) + "'' target='_blank'>link</a></td>"
         else:
             yield "<td>no link</td>"
+        if clip.reduced_text_link is not None:
+            yield "<td><a href='"+ str(clip.reduced_text_link) + "' ' target='_blank'>link</a></td>"
+        else:
+            yield "<td>no link</td>"
+        if clip.summary_text_link is not None:
+            yield "<td><a href='"+ str(clip.summary_text_link) + "' ' target='_blank'>link</a></td>"
+        else:
+            yield "<td>no link</td>"
+        if clip.topic is not None:
+            yield "<td>"+ str(clip.topic) + "</td>"
+        else:
+            yield "<td></td>"
         yield "</tr> "
 
     yield "</ul>"

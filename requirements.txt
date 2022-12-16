@@ -33,3 +33,4 @@ yake==0.4.8
 flask
 google-cloud-datastore
 gunicorn
+openai

@@ -10,7 +10,7 @@ sudo apt-get update && sudo apt-get install google-cloud-cli
 # git pull https://github.com/mdmclean/podcast-feed.git 
 # cd podcast-feed
 
-pip install --user -r requirements.txt 
+pip install --user -r ../requirements.txt 
 
 sudo apt install ffmpeg -y
 
