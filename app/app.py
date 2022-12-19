@@ -4,17 +4,19 @@ from flask import Flask, Response, render_template, request, stream_with_context
 from objects.google_datastore import GoogleDatastore
 from objects.overcast_details_fetcher import OvercastDetailsFetcher
 from objects.app_cache import AppCache
-from get_snippet_from_overcast import add_clip_summaries, group_unprocessed_clips,get_top_clips, store_overcast_timestamp, convert_overcast_timestamps_to_bookmarks, grab_clips, clean_up_episode_names
+from objects.open_ai_api import OpenAIApi
+from get_snippet_from_overcast import redo_topic_summary_for_clip, add_clip_summaries, group_unprocessed_clips,get_top_clips, store_overcast_timestamp, convert_overcast_timestamps_to_bookmarks, grab_clips, clean_up_episode_names
 
 web_app = Flask(__name__)
 
 overcast_web_fetcher = OvercastDetailsFetcher(100)
 store = GoogleDatastore()
 app_cache = AppCache(100)
+open_ai_api = OpenAIApi()
 #temp_folder_name = "temp-files" + str(datetime.now().strftime("%a%d%b%Y%H%M%S"))
 #os.mkdir(temp_folder_name)
-print (os.getcwd())
-os.chdir("app/temp-files") # TODO - gotta figure out how to fix this on live version
+#print (os.getcwd())
+#os.chdir("app/temp-files") # TODO - gotta figure out how to fix this on live version
 
 @web_app.route('/')
 def index():
@@ -48,9 +50,13 @@ def get_the_top_clips():
 
 @web_app.route('/add_clip_summaries', methods=['POST'])
 def summarize_clips():
-    add_clip_summaries(store)
-    return '', 200 
+    add_clip_summaries(store, open_ai_api)
+    return '', 200
 
+@web_app.route('/clip/<clip_id>/generate_topic', methods=['POST'])
+def generate_topic(clip_id):
+    new_clip_name = redo_topic_summary_for_clip(clip_id, store, open_ai_api)
+    return 'new clip name: ' + new_clip_name , 200
 
 if __name__ == "__main__":
     web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

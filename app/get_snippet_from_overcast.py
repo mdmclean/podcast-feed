@@ -27,8 +27,8 @@ from objects.google_datastore import GoogleDatastore
 from objects.app_cache import AppCache
 from objects.mp3_fetcher import Mp3Fetcher
 from objects.cut_and_transcribe_result import CutAndTransribeResult
+from objects.open_ai_api import OpenAIApi
 import utilities.pseudo_random_uuid as id_generator
-import openai
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
 
@@ -306,7 +306,7 @@ def grab_clips(store:GoogleDatastore):
 def get_number_bookmarks(clip:Clip):
     return clip.number_of_bookmarks / get_clip_length(clip)
 
-def add_clip_summaries(store:GoogleDatastore):
+def add_clip_summaries(store:GoogleDatastore, open_ai_api:OpenAIApi):
     clip_entities = store.get_all("Clip")
 
     clips = [EntityConversionHelper.clip_from_entity(clip) for clip in clip_entities]
@@ -315,12 +315,33 @@ def add_clip_summaries(store:GoogleDatastore):
 
     for clip in clips:
         if clip.reduced_text_link is None and not (clip.full_text_url is None):
-            get_summary_text_for_clip(clip, store)
+            get_summary_text_for_clip(clip, store, open_ai_api)
 
-def get_summary_text_for_clip(clip:Clip, store:GoogleDatastore):
+def redo_topic_summary_for_clip(clip_id:str, store:GoogleDatastore, open_ai_api:OpenAIApi):
+    entity = store.get_entity_by_key(clip_id, "Clip")
+    clip = EntityConversionHelper.clip_from_entity(entity)
+    clip_summary = urllib.request.urlopen(clip.reduced_text_link).read().decode()
+    clip.topic = get_topic_from_text(clip_summary, open_ai_api)
+    store.store_entry(clip.id, clip)
+    return clip.topic
+    
+
+def get_topic_from_text(text:str, open_ai_api:OpenAIApi):
+    prompt = "'" + text + "'" + " - Give this discussion a short category in the style of a book title."
+    response = open_ai_api.proccess_text(prompt, 30)
+    topic:str = response.choices[0].text
+    topic = topic.replace("\n", "")
+    topic = topic.replace('"', "")
+
+    # remove - this is a test
+    # prompt = "'" + text + "'" + " - Give this text a short category that could be used to locate it in the library."
+    # category = open_ai_api.proccess_text(prompt, 15).choices[0].text
+    # print (category)
+
+    return topic
+
+def get_summary_text_for_clip(clip:Clip, store:GoogleDatastore, open_ai_api:OpenAIApi):
     clip_text = urllib.request.urlopen(clip.full_text_url).read().decode()
-
-    openai.api_key = ""
 
     chunks = [clip_text[i:i+2000] for i in range(0, len(clip_text), 2000)]
     general_prompt = " - Summarize the above discussion."
@@ -329,18 +350,16 @@ def get_summary_text_for_clip(clip:Clip, store:GoogleDatastore):
 
     for chunk in chunks:
         my_prompt = "'" + chunk + "'" + general_prompt
-        response = openai.Completion.create(model="text-davinci-003", prompt=my_prompt, temperature=0, max_tokens=200)
+        response = open_ai_api.proccess_text(my_prompt, max_tokens=200)
         new_text += "\n " + response.choices[0].text
         print (response.choices[0].text)
         time.sleep(20)
 
     summary_prompt = "'" + new_text + "'" + " - Summarize the above discussion with as much detail as possible, without mentioning sponsors."
-    summary = openai.Completion.create(model="text-davinci-003", prompt=summary_prompt, temperature=0, max_tokens=500)
+    summary = open_ai_api.proccess_text(summary_prompt, 500)
     print (summary.choices[0].text)
 
-    super_summary_prompt = "'" + new_text + "'" + " - Give this discussion a category."
-    super_summary = openai.Completion.create(model="text-davinci-003", prompt=super_summary_prompt, temperature=0, max_tokens=10)
-    print (super_summary.choices[0].text)
+    clip.topic = get_topic_from_text(new_text, open_ai_api)
 
     project_name = 'personalpodcastfeed'
     bucket_name = 'podcast_feed'
@@ -356,8 +375,6 @@ def get_summary_text_for_clip(clip:Clip, store:GoogleDatastore):
     summary_text_blob.upload_from_string(summary.choices[0].text)
     clip.summary_text_link = summary_text_blob.public_url
 
-    clip.topic = super_summary.choices[0].text
-
     store.store_entry(clip.id, clip)
 
 def get_clip_length(clip:Clip):
@@ -371,7 +388,7 @@ def get_top_clips(store:GoogleDatastore):
     clips.sort(reverse=True, key=get_number_bookmarks)
     
     yield "<style type='text/css'>.myTable { background-color:#eee;border-collapse:collapse; }.myTable th { background-color:#000;color:white;width:50%;position: sticky; }.myTable td, .myTable th { padding:5px;border:1px solid #000; }</style>"
-    yield "<table class='myTable'><th>Number of bookmarks</th><th>Podcast</th><th>Episode</th><th>Start Time</th><th>Length</th><th>Episode Link</th><th>Clip Link</th><th>ngram</th><th>Full text link</th><th>Reduced text</th><th>Summary text</th><th>Topic</th>"
+    yield "<table class='myTable'><th>Id</th><th>Number of bookmarks</th><th>Podcast</th><th>Episode</th><th>Start Time</th><th>Length</th><th>Episode Link</th><th>Clip Link</th><th>ngram</th><th>Full text link</th><th>Reduced text</th><th>Summary text</th><th>Topic</th>"
 
     for clip in clips:
         episode_entity = store.get_entity_by_key(clip.fk_episode_id, 'Episode')
@@ -390,6 +407,7 @@ def get_top_clips(store:GoogleDatastore):
         minutes_to_listen_to = get_clip_length(clip)
 
         yield "<tr>"
+        yield "<td>" + str(clip.id) + "</td>"
         yield "<td>" + str(clip.number_of_bookmarks) + "</td>"
         yield "<td>" + podcast.show_name + "</td>"
         yield "<td>" + episode.episode_name + "</td>"
