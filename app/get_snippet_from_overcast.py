@@ -1,6 +1,3 @@
-import os
-import subprocess
-import sys
 import urllib.request
 import urllib.parse
 import re
@@ -8,18 +5,13 @@ import math
 from datetime import datetime, timedelta, timezone
 from google.cloud import storage
 import xml.etree.ElementTree as ET
-from google.cloud import speech_v1p1beta1 as speech
-from numpy import true_divide
-import yake
-from mutagen.id3 import APIC, ID3
-from google.cloud import texttospeech
-from google.cloud import datastore
 import time
+from objects.summarization_service import SummarizationService
+from objects.episode_clipping_service import EpisodeClippingService
 from objects.entity_conversion_helper import EntityConversionHelper
 from objects.overcast_details_fetcher import OvercastDetailsFetcher
 from objects.bookmark import Bookmark
 from objects.overcast_bookmark import OvercastBookmark
-from utilities.pseudo_random_uuid import pseudo_random_uuid
 from objects.podcast import Podcast
 from objects.episode import Episode
 from objects.clip import Clip
@@ -31,58 +23,6 @@ from objects.open_ai_api import OpenAIApi
 import utilities.pseudo_random_uuid as id_generator
 
 PODCAST_XML_FILE = 'podcast-rss.xml'
-
-def speech_to_text(clip_gs_link, channel_count):
-    diarization_config = speech.SpeakerDiarizationConfig(
-        enable_speaker_diarization=True,
-        min_speaker_count=1,
-        max_speaker_count=2,
-    )
-
-    config = speech.RecognitionConfig()
-    config.language_code = "en-us" 
-    config.encoding = speech.RecognitionConfig.AudioEncoding.FLAC
-    config.enable_automatic_punctuation = True
-    config.audio_channel_count = channel_count
-    config.diarization_config = diarization_config
-
-    audio = speech.RecognitionAudio()
-    audio.uri = clip_gs_link
-
-    text = speech_to_text_google(config, audio)
-    return text 
-
-def get_top_keywords (text):
-    language = "en"
-    max_ngram_size = 3
-    deduplication_threshold = 0.1
-    deduplication_algo = 'seqm'
-    windowSize = 1
-    numOfKeywords = 5
-    kw_extractor = yake.KeywordExtractor(lan=language, n=max_ngram_size, dedupLim=deduplication_threshold, dedupFunc=deduplication_algo, windowsSize=windowSize, top=numOfKeywords, features=None)
-    keywords = kw_extractor.extract_keywords(text)
-    keywords_reduced = [keyword[0].lower() for keyword in keywords] # get just the word, not the weighting
-    return keywords_reduced
-
-def speech_to_text_google(config, audio):
-    client = speech.SpeechClient()
-    request = client.long_running_recognize(config=config, audio=audio)
-    
-    response = request.result()
-
-    text = ""
-    for result in response.results:
-        best_alternative = result.alternatives[0].transcript
-        text += best_alternative + " "
-    return text
-
-def id3_lookup_helper(id3, tag_name):
-    # add a try catch here eventually
-    array_of_matches = id3[tag_name]
-    if len(array_of_matches) > 0:
-        return array_of_matches[0]
-    else:
-        return 'not found'
 
 class PodcastDetails:
     def __init__(self, title, publishDate, websiteLink,
@@ -132,10 +72,6 @@ def get_start_timestamp(end_timestamp, mins):
     start_time = end_datetime - timedelta(minutes=mins)
     return start_time.strftime('%H:%M:%S')
 
-def remove_special_characters(text):
-    remove_special_characters =  re.sub('\W+', '', text)
-    return remove_special_characters
-
 
 def pull_mp3_from_overcast(overcast_url, filename):
     web_page = urllib.request.urlopen(overcast_url).read().decode()
@@ -146,14 +82,6 @@ def pull_mp3_from_overcast(overcast_url, filename):
     return "" 
     # TODO refactor - OvercastBookmark.get_title_from_overcast_page(None, web_page)
 
-def pull_mp3(mp3_url, temp_file_location):
-    mp3_bytes = urllib.request.urlopen(mp3_url).read()
-    mp3_file = open(temp_file_location, 'wb')
-    mp3_file.write(mp3_bytes)
-
-def log_info (text):
-    current_date_string = datetime.now().strftime("%a, %d %b %Y %H:%M:%S %Z")
-    print (current_date_string + " - " + text)
 
 
 def store_overcast_timestamp(overcast_url, added_by, store:GoogleDatastore):
@@ -267,46 +195,46 @@ def group_unprocessed_clips(store:GoogleDatastore):
             bookmark.is_processed = True
             store.store_entry(bookmark.id, bookmark)
 
-def grab_clips(store:GoogleDatastore):
-        unprocessed_clip_entities = store.get_unprocessed("Clip", "is_processed") 
-        fetcher = Mp3Fetcher(20)
+def grab_clips(store:GoogleDatastore,  episode_clipping_service:EpisodeClippingService):
+    unprocessed_clip_entities = store.get_unprocessed("Clip", "is_processed") 
+    fetcher = Mp3Fetcher(20)
 
-        for entity in unprocessed_clip_entities: 
-            clip = EntityConversionHelper.clip_from_entity(entity)
-            #TODO - cache
-            episode_entity = store.get_entity_by_key(clip.fk_episode_id, 'Episode')
-            episode = EntityConversionHelper.episode_from_entity(episode_entity)
+    for entity in unprocessed_clip_entities: 
+        clip = EntityConversionHelper.clip_from_entity(entity)
+        #TODO - cache
+        episode_entity = store.get_entity_by_key(clip.fk_episode_id, 'Episode')
+        episode = EntityConversionHelper.episode_from_entity(episode_entity)
 
-            podcast_entity = store.get_entity_by_key(episode.fk_show_id, 'Podcast')
-            podcast = EntityConversionHelper.podcast_from_entity(podcast_entity)
+        podcast_entity = store.get_entity_by_key(episode.fk_show_id, 'Podcast')
+        podcast = EntityConversionHelper.podcast_from_entity(podcast_entity)
 
-            if podcast.rss_feed_url is None or podcast.rss_feed_url == '':
-                #wait till we know where to look!
-                continue
+        if podcast.rss_feed_url is None or podcast.rss_feed_url == '':
+            #wait till we know where to look!
+            continue
 
-            if not(episode.has_mp3()):
-                episode.mp3_url = fetcher.get_mp3_from_rss_url(episode.episode_name, podcast.rss_feed_url)
-                store.store_entry(episode.id, episode)
+        if not(episode.has_mp3()):
+            episode.mp3_url = fetcher.get_mp3_from_rss_url(episode.episode_name, podcast.rss_feed_url)
+            store.store_entry(episode.id, episode)
 
-            if episode.has_mp3() and not(clip.has_mp3()):
-                try:
-                    result:CutAndTransribeResult = cut_and_transcribe_clip(episode.mp3_url, clip.clip_start, clip.clip_end, podcast.show_name, episode.episode_name)
-                    clip.full_text_url = result.full_text_url
-                    clip.top_ngrams = result.top_ngrams
-                    clip.mp3_url = result.mp3_url
-                    clip.size_bytes = result.mp3_size_bytes
-                    clip.image_url = result.image_url
-                    clip.updated_unix_timestamp = time.time()
-                    clip.is_processed = True
-                    store.store_entry(clip.id, clip)
-                except Exception as e: 
-                    print ("failed for " + episode.episode_name + " - " + str(e))
+        if episode.has_mp3() and not(clip.has_mp3()):
+            try:
+                result:CutAndTransribeResult = episode_clipping_service.cut_and_transcribe_clip(episode.mp3_url, clip, False, podcast.show_name, episode.episode_name)
+                clip.full_text_url = result.full_text_url
+                clip.top_ngrams = result.top_ngrams
+                clip.mp3_url = result.mp3_url
+                clip.size_bytes = result.mp3_size_bytes
+                clip.image_url = result.image_url
+                clip.updated_unix_timestamp = time.time()
+                clip.is_processed = True
+                store.store_entry(clip.id, clip)
+            except Exception as ex: 
+                print ("failed for " + episode.episode_name + " - " + str(ex))
 
 
 def get_number_bookmarks(clip:Clip):
     return clip.number_of_bookmarks / get_clip_length(clip)
 
-def add_clip_summaries(store:GoogleDatastore, open_ai_api:OpenAIApi):
+def add_clip_summaries(store:GoogleDatastore, summarization_service:SummarizationService):
     clip_entities = store.get_all("Clip")
 
     clips = [EntityConversionHelper.clip_from_entity(clip) for clip in clip_entities]
@@ -315,67 +243,21 @@ def add_clip_summaries(store:GoogleDatastore, open_ai_api:OpenAIApi):
 
     for clip in clips:
         if clip.reduced_text_link is None and not (clip.full_text_url is None):
-            get_summary_text_for_clip(clip, store, open_ai_api)
+            summary_result = summarization_service.get_clip_summary(clip)
+            clip.topic = summary_result.topic
+            # TODO - add links for reduction and summary
+            store.store_entry(clip.id, clip)
 
-def redo_topic_summary_for_clip(clip_id:str, store:GoogleDatastore, open_ai_api:OpenAIApi):
+def get_clip_from_id(clip_id:str, store:GoogleDatastore):
     entity = store.get_entity_by_key(clip_id, "Clip")
-    clip = EntityConversionHelper.clip_from_entity(entity)
+    return EntityConversionHelper.clip_from_entity(entity)
+
+def redo_topic_summary_for_clip(clip_id:str, store:GoogleDatastore, summary_service:SummarizationService):
+    clip = get_clip_from_id(clip_id, store)
     clip_summary = urllib.request.urlopen(clip.reduced_text_link).read().decode()
-    clip.topic = get_topic_from_text(clip_summary, open_ai_api)
+    clip.topic = summary_service.get_topic_from_text(clip_summary)
     store.store_entry(clip.id, clip)
     return clip.topic
-    
-
-def get_topic_from_text(text:str, open_ai_api:OpenAIApi):
-    prompt = "'" + text + "'" + " - Give this discussion a short category in the style of a book title."
-    response = open_ai_api.proccess_text(prompt, 30)
-    topic:str = response.choices[0].text
-    topic = topic.replace("\n", "")
-    topic = topic.replace('"', "")
-
-    # remove - this is a test
-    # prompt = "'" + text + "'" + " - Give this text a short category that could be used to locate it in the library."
-    # category = open_ai_api.proccess_text(prompt, 15).choices[0].text
-    # print (category)
-
-    return topic
-
-def get_summary_text_for_clip(clip:Clip, store:GoogleDatastore, open_ai_api:OpenAIApi):
-    clip_text = urllib.request.urlopen(clip.full_text_url).read().decode()
-
-    chunks = [clip_text[i:i+2000] for i in range(0, len(clip_text), 2000)]
-    general_prompt = " - Summarize the above discussion."
-
-    new_text = ""
-
-    for chunk in chunks:
-        my_prompt = "'" + chunk + "'" + general_prompt
-        response = open_ai_api.proccess_text(my_prompt, max_tokens=200)
-        new_text += "\n " + response.choices[0].text
-        print (response.choices[0].text)
-        time.sleep(20)
-
-    summary_prompt = "'" + new_text + "'" + " - Summarize the above discussion with as much detail as possible, without mentioning sponsors."
-    summary = open_ai_api.proccess_text(summary_prompt, 500)
-    print (summary.choices[0].text)
-
-    clip.topic = get_topic_from_text(new_text, open_ai_api)
-
-    project_name = 'personalpodcastfeed'
-    bucket_name = 'podcast_feed'
-    storage_client = storage.Client(project_name)
-    bucket = storage_client.bucket(bucket_name)
-    unique_file_title = clip.bookmark_hash
-
-    reduced_text_blob = bucket.blob(unique_file_title + "-reduced" +".txt")
-    reduced_text_blob.upload_from_string(new_text)
-    clip.reduced_text_link = reduced_text_blob.public_url
-
-    summary_text_blob = bucket.blob(unique_file_title + "-summary" +".txt")
-    summary_text_blob.upload_from_string(summary.choices[0].text)
-    clip.summary_text_link = summary_text_blob.public_url
-
-    store.store_entry(clip.id, clip)
 
 def get_clip_length(clip:Clip):
     return math.ceil((parse_overcast_timestamp(clip.clip_end) - parse_overcast_timestamp(clip.clip_start)).total_seconds() / 60)
@@ -443,7 +325,6 @@ def get_top_clips(store:GoogleDatastore):
     yield "</ul>"
 
 
-
 def add_clip_to_personal_feed(clip:Clip, episode:Episode, podcast:Podcast):
     guid_string = str(clip.id)
     project_name = 'personalpodcastfeed'
@@ -469,7 +350,7 @@ def add_clip_to_personal_feed(clip:Clip, episode:Episode, podcast:Podcast):
     podcast.title = clip.top_ngrams
     podcast.displayImageLink = clip.image_url
     
-    log_info ("Adding to podcast feed...")
+    print ("Adding to podcast feed...")
     rss = ET.fromstring(rss_xml_string)
     channel = rss.find('channel') 
     podcast_xml_subelement = ET.fromstring(create_new_podcast_entry(podcast)).find('item')
@@ -488,116 +369,6 @@ def clean_up_episode_names (store:GoogleDatastore):
     for ep in episodes: 
         ep.episode_name = ep.episode_name.replace("&rsquo;", "'")
         store.store_entry(ep.id, ep)
-        
-
-def cut_and_transcribe_clip(mp3_location, start_time, end_time, podcast_name, episode_name): # TODO update to receive clip details
-    result:CutAndTransribeResult = CutAndTransribeResult(None, None, None, None, None)
-    full_mp3_file_name = remove_special_characters(episode_name) +".mp3"
-    project_name = 'personalpodcastfeed'
-    bucket_name = 'podcast_feed'
-    storage_client = storage.Client(project_name)
-    bucket = storage_client.bucket(bucket_name)
-    full_mp3_blob = bucket.blob(full_mp3_file_name)
-
-    log_info ("Grabbing mp3...")
-    if not full_mp3_blob.exists():
-        pull_mp3(mp3_location, full_mp3_file_name)
-        full_mp3_blob.upload_from_filename(full_mp3_file_name)
-    else:
-        full_mp3_blob.download_to_filename(full_mp3_file_name)
-
-    file_friendly_timestamp = start_time.replace(':', '')
-    unique_file_title = file_friendly_timestamp + re.sub('\W+', '', ((episode_name+podcast_name)[:50]))
-    temp_flac_title = "temp-" + unique_file_title + ".flac"
-
-    log_info("Trimming clip...")
-    commands = ['ffmpeg', '-y', '-i', full_mp3_file_name, '-ss', start_time, '-to', end_time, '-f', 'flac', temp_flac_title]
-    subprocess.run(commands)
-
-    log_info ("Getting channel count...")
-    flac_channel_count = int((subprocess.run(['ffprobe', '-i', temp_flac_title, '-show_entries', 'stream=channels', '-select_streams', 'a:0', '-of', 'compact=p=0:nk=1', '-v', '0'], capture_output=True, text=True).stdout).rstrip('\n'))
-
-    log_info ("Getting speech-to-text...")
-    full_text_blob = bucket.blob(unique_file_title + "-transcript" +".txt")
-    text_for_audio = ""
-    if full_text_blob.exists():
-        text_for_audio = full_text_blob.download_as_text()
-    else: 
-        temp_flac_blob = bucket.blob(temp_flac_title)
-        temp_flac_blob.upload_from_filename(temp_flac_title)
-        gsutil_uri = 'gs://' + bucket_name + '/' + temp_flac_title
-        text_for_audio = speech_to_text(gsutil_uri, flac_channel_count)
-        temp_flac_blob.delete()
-        full_text_blob.upload_from_string(text_for_audio)
-    
-    log_info ("Getting title and art...")
-    top_words = " ".join(((", ".join(get_top_keywords(text_for_audio))).capitalize()).split()[:10])
-
-    result.top_ngrams = top_words
-    result.full_text_url = full_text_blob.public_url
-
-    image_search_local_file_name = image_search(top_words + " clip art")
-    image_blob = bucket.blob(image_search_local_file_name)
-    image_blob.upload_from_filename(image_search_local_file_name)
-    result.image_url = image_blob.public_url
-
-    temp_text_to_speech_file = top_words+'speech.mp3'
-    temp_intro_file = top_words+'_intro.mp3'
-    temp_intro_combined_file = top_words+'combined.mp3'
-
-    log_info ("Mixing intro...")
-    text_to_speech(temp_text_to_speech_file, "Welcome! This is:" + top_words + "! " + 'An excerpt from ' + podcast_name + '. Episode: ' + episode_name)
-    commands = ['ffmpeg', '-i', 'intro2.mp3', '-i', temp_text_to_speech_file, '-filter_complex', '[1:a:0]adelay=3000[a1];[a1]volume=volume=2.5[aa1];[0:a:0][aa1]amix=inputs=2[a]', '-map', '[a]', '-y', temp_intro_file]
-    subprocess.run(commands)
-    commands = ['ffmpeg', '-i', temp_flac_title, '-i', temp_intro_file, '-i', 'outro.mp3', '-filter_complex', '[1:a:0][0:a:0][2:a:0]concat=n=3:v=0:a=1[out]', '-map', '[out]', '-y', temp_intro_combined_file]    
-    subprocess.run(commands)
-
-    log_info ("Creating final mp3...")
-    unique_mp3_title = unique_file_title + ".mp3" 
-    commands = ['ffmpeg', '-y', '-i', temp_intro_combined_file, '-i', image_search_local_file_name, '-map', '1', '-map', '0', '-ab', '320k', '-map_metadata', '0', '-id3v2_version', '3', '-disposition:0', 'attached_pic', '-y', unique_mp3_title ]
-    subprocess.run(commands)
-
-    result.mp3_size_bytes = os.path.getsize(unique_mp3_title)
-    
-    file = ID3(unique_mp3_title)
-    with open(image_search_local_file_name, 'rb') as albumart:
-        file.add(APIC(
-            encoding=3,
-            mime='image/jpeg',
-            type=3, desc=u'Cover',
-            data=albumart.read()
-        ))
-
-    log_info("Uploading to bucket...")
-    mp3_blob = bucket.blob(unique_mp3_title)
-    mp3_blob.upload_from_filename(unique_mp3_title)
-
-    result.mp3_url = mp3_blob.public_url
-
-    log_info ("Cleaning up...")
-    os.remove(temp_flac_title)
-    os.remove(temp_intro_file)
-    os.remove(temp_intro_combined_file)
-    os.remove(temp_text_to_speech_file)
-    os.remove(unique_mp3_title)
-    os.remove(image_search_local_file_name)
-    os.remove(full_mp3_file_name)
-    return result
-
-def image_search(text):
-    text = urllib.parse.quote(text.encode('utf-8'))
-    headers = {}
-    headers['User-Agent'] = "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36"
-    url = "https://www.google.com/search?q=" +text + "&tbm=isch"
-    req = urllib.request.Request(url, headers=headers)
-    web_page = urllib.request.urlopen(req).read().decode()
-    image_url = "https://encrypted" + re.search('(?<=src="https://encrypted)(.*?)(?=")', web_page).group(0)
-    req = urllib.request.Request(image_url, headers=headers)
-    image_bytes = urllib.request.urlopen(req).read()
-    file_name = text+".jpeg"
-    image_file = open(file_name, 'wb')
-    image_file.write(image_bytes)
-    return file_name
 
 def create_new_podcast_entry(new_podcast):
     template_file = open('podcast-episode-template.xml')
@@ -616,31 +387,18 @@ def create_new_podcast_entry(new_podcast):
     }
     return (template_string%data)
 
-def text_to_speech(file_name, text_to_speak):
-    # Instantiates a client
-    client = texttospeech.TextToSpeechClient()
+def get_episode_from_id(episode_id:str, store:GoogleDatastore):
+    episode_entity = store.get_entity_by_key(episode_id, "Episode")
+    episode = EntityConversionHelper.episode_from_entity(episode_entity)
+    return episode
 
-    # Set the text input to be synthesized
-    synthesis_input = texttospeech.SynthesisInput(text=text_to_speak)
+def get_podcast_from_id(podcast_id:str, store:GoogleDatastore):
+    podcast_entity = store.get_entity_by_key(podcast_id, "Podcast")
+    podcast = EntityConversionHelper.podcast_from_entity(podcast_entity)
+    return podcast
 
-    # Build the voice request, select the language code ("en-US") and the ssml
-    # voice gender ("neutral")
-    voice = texttospeech.VoiceSelectionParams(
-        language_code="en-US", ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL
-    )
-
-    # Select the type of audio file you want returned
-    audio_config = texttospeech.AudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.MP3
-    )
-
-    # Perform the text-to-speech request on the text input with the selected
-    # voice parameters and audio file type
-    response = client.synthesize_speech(
-        input=synthesis_input, voice=voice, audio_config=audio_config
-    )
-
-    # The response's audio_content is binary.
-    with open(file_name, "wb") as out:
-        # Write the response to the output file.
-        out.write(response.audio_content)
+def reprocess_clip_audio(clip_id:str, store:GoogleDatastore, episode_clipping_service):
+    clip:Clip = get_clip_from_id(clip_id, store)
+    episode:Episode = get_episode_from_id(clip.fk_episode_id, store)
+    podcast:Podcast = get_podcast_from_id(episode.fk_show_id, store)
+    episode_clipping_service.cut_and_transcribe_clip(episode.mp3_url, clip, False, podcast.show_name, episode.episode_name)
