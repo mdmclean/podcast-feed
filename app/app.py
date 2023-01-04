@@ -8,7 +8,7 @@ from objects.overcast_details_fetcher import OvercastDetailsFetcher
 from objects.app_cache import AppCache
 from objects.open_ai_api import OpenAIApi
 from objects.summarization_service import SummarizationService
-from get_snippet_from_overcast import reprocess_clip_audio, redo_topic_summary_for_clip, add_clip_summaries, group_unprocessed_clips,get_top_clips, store_overcast_timestamp, convert_overcast_timestamps_to_bookmarks, grab_clips, clean_up_episode_names
+from get_snippet_from_overcast import add_clip_to_feed, create_new_podcast_feed, reprocess_clip_audio, redo_topic_summary_for_clip, add_clip_summaries, group_unprocessed_clips,get_top_clips, store_overcast_timestamp, convert_overcast_timestamps_to_bookmarks, grab_clips, clean_up_episode_names
 
 web_app = Flask(__name__)
 
@@ -67,6 +67,17 @@ def generate_topic(clip_id):
 @web_app.route('/clip/<clip_id>/reprocess', methods=['POST'])
 def reprocess_clip(clip_id):
     reprocess_clip_audio(clip_id, store, episode_clipping_service)
+    return '', 200
+
+@web_app.route('/feed/create', methods=['POST'])
+def create_feed():
+    content = request.get_json()
+    create_new_podcast_feed(content['feed_name'], bucket_manager)
+    return '', 200
+
+@web_app.route('/feed/<feed_name>/add_clip/<clip_id>', methods=['POST'])
+def add_clip_to_podcast_feed(feed_name, clip_id):
+    add_clip_to_feed(feed_name, clip_id, bucket_manager, store)
     return '', 200
 
 if __name__ == "__main__":

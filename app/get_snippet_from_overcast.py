@@ -3,9 +3,9 @@ import urllib.parse
 import re
 import math
 from datetime import datetime, timedelta, timezone
-from google.cloud import storage
 import xml.etree.ElementTree as ET
 import time
+from objects.bucket_manager import BucketManager
 from objects.summarization_service import SummarizationService
 from objects.episode_clipping_service import EpisodeClippingService
 from objects.entity_conversion_helper import EntityConversionHelper
@@ -19,18 +19,14 @@ from objects.google_datastore import GoogleDatastore
 from objects.app_cache import AppCache
 from objects.mp3_fetcher import Mp3Fetcher
 from objects.cut_and_transcribe_result import CutAndTransribeResult
-from objects.open_ai_api import OpenAIApi
 import utilities.pseudo_random_uuid as id_generator
 
-PODCAST_XML_FILE = 'podcast-rss.xml'
-
 class PodcastDetails:
-    def __init__(self, title, publishDate, websiteLink,
+    def __init__(self, title, publishDate,
         guid, displayImageLink, descriptionHtml, descriptionHtmlEncoded,
         lengthBytes, mp3Link, durationString, subtitle, podcaster,episode_title):
         self.title = title
         self.publishDate = publishDate
-        self.websiteLink = websiteLink
         self.guid = guid
         self.displayImageLink = displayImageLink
         self.descriptionHtml = descriptionHtml
@@ -43,11 +39,11 @@ class PodcastDetails:
         self.episode_title = episode_title
 
     @classmethod
-    def create(cls, overcast_url, podcast_show_title, podcast_episode_title):
+    def create(cls, podcast_show_title, podcast_episode_title):
         current_date_string = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %Z")
-        simple_description = 'An excerpt from ' + podcast_show_title + ' episode ' + podcast_episode_title + '. Continue listening on <a href="' + overcast_url + '">Overcast</a>'
+        simple_description = 'An excerpt from ' + podcast_show_title + ' episode ' + podcast_episode_title + '.'
         podcast_title = generate_acronym(podcast_show_title) + ": "
-        return cls(podcast_title,current_date_string,overcast_url,'make a custom but deterministic guid', '',
+        return cls(podcast_title,current_date_string,'make a custom but deterministic guid', '',
             simple_description,simple_description,'length not set yet', 'audio link not set yet',
             'duration not set yet',simple_description,podcast_show_title,podcast_episode_title)
 
@@ -134,8 +130,6 @@ def convert_overcast_timestamps_to_bookmarks(overcast_web_fetcher:OvercastDetail
         podcast:Podcast = get_or_add_podcast_by_name(app_cache, store, overcast_bookmark.get_show_title())
 
         episode:Episode = get_or_add_episode_by_name(app_cache, store, overcast_bookmark.get_episode_title(), podcast.id)
-
-
 
         bookmark = Bookmark(episode.id, overcast_bookmark.timestamp, overcast_bookmark.added_by, "Overcast", overcast_bookmark.id, overcast_bookmark.unix_timestamp, False)
         if not store.check_if_entity_exists(bookmark.id, "Bookmark"):
@@ -325,41 +319,52 @@ def get_top_clips(store:GoogleDatastore):
     yield "</ul>"
 
 
-def add_clip_to_personal_feed(clip:Clip, episode:Episode, podcast:Podcast):
-    guid_string = str(clip.id)
-    project_name = 'personalpodcastfeed'
-    bucket_name = 'podcast_feed'
-    storage_client = storage.Client(project_name)
-    bucket = storage_client.bucket(bucket_name)
-    feed_blob = bucket.blob(PODCAST_XML_FILE)
+# assumes that the feed xml is already created and stored in local directory
+# TODO - create a new feed from scratch if it doesn't exist
+def create_new_podcast_feed(feed_file_name:str, bucket_manager:BucketManager):
+    feed_blob = bucket_manager.get_blob(feed_file_name)
+    if not feed_blob.exists():
+        feed_blob.upload_from_filename(feed_file_name)
+
+def add_clip_to_feed(feed_name:str, clip_id:str, bucket_manager:BucketManager, store:GoogleDatastore):
+    feed_blob = bucket_manager.get_blob(feed_name)
+    if not feed_blob.exists():
+        raise Exception("Feed file does not exist")
+
     rss_xml_string = feed_blob.download_as_text()
+
+    clip:Clip = get_clip_from_id(clip_id, store)
+    episode:Episode = get_episode_from_id(clip.fk_episode_id, store)
+    podcast:Podcast = get_podcast_from_id(episode.fk_show_id, store)
+
+    guid_string = str(clip.id)
 
     if guid_string in rss_xml_string: 
         return ""    # break if rss xml string already contains guid
 
-    mp3_duration_seconds = math.ceil((parse_overcast_timestamp(clip.clip_end) - parse_overcast_timestamp(clip.clip_start)).total_seconds() / 60)
+    mp3_duration_seconds = math.ceil((parse_overcast_timestamp(clip.clip_end) - parse_overcast_timestamp(clip.clip_start)).total_seconds())
 
-    podcast = PodcastDetails.create(episode.mp3_url, podcast.show_name, episode.episode_name)
+    podcast = PodcastDetails.create(podcast.show_name, episode.episode_name)
     podcast.lengthBytes = clip.size_bytes
     podcast.durationString = "{:0>8}".format(str(timedelta(seconds=mp3_duration_seconds)))
     podcast.guid = clip.id
-    text_blob = bucket.from_string(clip.full_text_url)
-    text_for_audio = text_blob.download_as_texT()
+    text_for_audio = urllib.request.urlopen(clip.summary_text_link).read().decode()
     podcast.descriptionHtml = podcast.descriptionHtml + "<br/>" + "<br/>" + text_for_audio
     podcast.mp3Link = clip.mp3_url
-    podcast.title = clip.top_ngrams
+    podcast.title = clip.topic
     podcast.displayImageLink = clip.image_url
     
     print ("Adding to podcast feed...")
     rss = ET.fromstring(rss_xml_string)
     channel = rss.find('channel') 
-    podcast_xml_subelement = ET.fromstring(create_new_podcast_entry(podcast)).find('item')
+    podcast_entry_string = create_new_podcast_entry(podcast)
+    podcast_xml_subelement = ET.fromstring(podcast_entry_string).find('item')
     channel.append(podcast_xml_subelement)
-    with open(PODCAST_XML_FILE, 'wb') as file:
+    with open(feed_name, 'wb') as file:
         tree = ET.ElementTree(rss)
-        tree.write(file)  
+        tree.write(file)
 
-    feed_blob.upload_from_filename(PODCAST_XML_FILE)
+    feed_blob.upload_from_filename(feed_name)
 
 def clean_up_episode_names (store:GoogleDatastore):
     episode_entries = store.get_all("Episode")
@@ -375,7 +380,7 @@ def create_new_podcast_entry(new_podcast):
     template_string = template_file.read()
     data = {'title':new_podcast.title, 
         'publishDate':new_podcast.publishDate, 
-        'websiteLink':new_podcast.websiteLink,
+        'websiteLink':new_podcast.mp3Link,
         'guid': new_podcast.guid,
         'displayImageLink': new_podcast.displayImageLink,
         'descriptionHtml': new_podcast.descriptionHtml,
